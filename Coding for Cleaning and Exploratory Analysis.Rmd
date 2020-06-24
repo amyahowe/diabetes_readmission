@@ -1,0 +1,915 @@
+---
+title: "CKME136 Capstone - Cleaning and Exploratory Analysis of Diabetes Readmission Data"
+author: Amy Howe
+output: html_document
+---
+
+# Packages
+
+Install and load required packages, if needed.
+```{r Install and Load Packages If Required, message=FALSE}
+if(!require('tidyverse')){install.packages('tidyverse')} # For factor collapsing
+library(tidyverse)
+if(!require('ggplot2')){install.packages('ggplot2')} # For visualizations
+library(ggplot2)
+if(!require('gridExtra')){install.packages('gridExtra')} # For visualizations
+library(gridExtra)
+if(!require('corrplot')){install.packages('corrplot')} # For visualizations
+library(corrplot)
+if(!require('Hmisc')){install.packages('Hmisc')} # For rcorr function
+library(Hmisc)
+if(!require('ggcorrplot')){install.packages('ggcorrplot')} # For correlation heatmap
+library(ggcorrplot)
+if(!require('dplyr')){install.packages('dplyr')} # For grouping
+library(dplyr)
+if(!require('mltools')){install.packages('mltools')} # To create dummy variables
+library(mltools)
+if(!require('data.table')){install.packages('data.table')} # To create dummy variables
+library(data.table)
+```
+
+# Initial Data Cleaning
+
+First import the raw data, and save it to the object db.raw
+```{r Import}
+db.raw <- read.csv('INSERT_FILE_PATH_HERE')
+```
+
+Let's take a look at the structure of the dataset, and identify if there are any duplicated rows or "NA" values.
+```{r Initial Structure Review}
+str(db.raw) # There are 50 variables and 101766 observations
+length(subset(duplicated(db.raw), duplicated(db.raw) == TRUE)) # The output is 0, indicating there are no fully duplicated rows
+sum(is.na(db.raw)) # There are no "NA" values in entire dataset
+```
+
+## Convert Attributes to Correct Data Types
+
+Now we will convert attributes to the correct data types, and add in any missing level names.
+```{r Convert Attributes to Correct Data Types}
+db.init <- db.raw # Put the dataset in a new object for initial analysis and cleaning
+sapply(db.init[,c(3:6,11:12,23:50)], levels) # The levels of all factor attributes except for the diagnoses were checked here for overlap - none present
+db.init$weight <- factor(db.init$weight, levels = c("?", "[0-25)", "[25-50)", "[50-75)", "[75-100)", "[100-125)", "[125-150)", "[150-175)", "[175-200)", ">200")) # Reorder the factor levels for weight to represent true ordering
+
+# Need to convert admission_type_id, discharge_disposition_id and admission_source_id each to a factor and add in level names (based on supplementary id_mapping document)
+
+table(db.init$admission_type_id) # Confirmed that all levels (1-8) are present and each have cases
+db.init$admission_type_id <- as.factor(db.init$admission_type_id)
+levels(db.init$admission_type_id) <- c('Emergency', 'Urgent', 'Elective', 'Newborn', 'NotAvailable', 'NULL', 'TraumaCenter', 'NotMapped')
+
+table(db.init$discharge_disposition_id) # Categories 21, 26, 29, and 30 are missing when compared to id_mapping doc; missing because 0 cases; will not add level names for them
+db.init$discharge_disposition_id <- as.factor(db.init$discharge_disposition_id)
+levels(db.init$discharge_disposition_id) <- c('DcHome', 'DcAnotherSTHospital', 'DcSNF', 'DcICF', 'DcOtherTypeInpatient', 'DcHomeWithHomeService', 'LeftAMA', 'DcHomeWithIVCare', 'AdmittedInpatientThisHospital', 'NeonateDcOtherHospital', 'Expired', 'StillPatientOrOutpatient', 'HospiceHome', 'HospiceFacility', 'DcWithinSwingBed', 'RefOtherOutpatient', 'RefSameOutpatient', 'NULL', 'ExpiredHome', 'ExpiredFacility', 'DcRehab', 'DcLTCHospital', 'DcMedicaidNursingFacility', 'NotMapped', 'DcFederalHealthFacility','DcPsychiatric')
+
+table(db.init$admission_source_id) # Categories 12, 15, 18, 19, 21, 23, 24, and 26 are missing when compared to id_mapping doc. Note: there is no category 16 in the id_mapping doc, nor is one present in the data
+db.init$admission_source_id <- as.factor(db.init$admission_source_id)
+levels(db.init$admission_source_id) <- c('PhysRef', 'ClinicRef', 'HMORef', 'TransferFromHospital', 'TransferFromSNF', 'TransferFromOtherHealthFacility', 'ER', 'CourtOrLawEnf', 'NotAvailable', 'TransferFromCriticalAccessHospital', 'NormalDelivery', 'SickBaby', 'ExtramuralBirth', 'NULL', 'NotMapped', 'SepClaim', 'TransferFromAmbSurg')
+
+# No need to check specifically for overlap in levels of diagnoses, as these are all ICD-9-CM codes. Just skimmed the levels to ensure the levels were either ICD codes or '?'
+levels(db.init$diag_1)
+levels(db.init$diag_2)
+levels(db.init$diag_3)
+```
+
+All remaining attributes are the correct data types.
+
+## Remove Out of Scope Cases
+
+If there are multiple encounters for the same patient, we want to remove any after the first one. This is because we want to ensure observations are independent, so that we may run statistical tests on them during analysis and not violate the assumption of independence. We are interested in the the first encounter of each patient, as we are focused on early identification of the risks of readmission.
+
+Additionally, cases where the patient died, or were sent to hospice for end-of-life care should be excluded, as there is no chance of readmission.
+```{r Remove Out of Scope Cases}
+length(unique(db.init$encounter_id)) # There are 101766 unique encounters, which is the total number of observations in the dataset
+length(unique(db.init$patient_nbr)) # There are only 71518 unique patient IDs, indicating that a number of patients have 2 or more encounters
+db.init <- db.init[order(db.init$encounter_id),] # Sort patient encounters in ascending order; lower numbers indicate earlier encounters
+db.init <- db.init[!duplicated(db.init$patient_nbr), ] # Remove rows with duplicated patient IDs; the first instance (with the lower encounter number) will be kept, with any later instances removed
+dim(db.init) # Confirmed the resulting data frame has 50 attributes and 71518 observations, as expected
+
+
+db.init <- subset(db.init, discharge_disposition_id != 'Expired' & discharge_disposition_id != 'ExpiredHome' & discharge_disposition_id != 'ExpiredFacility' & discharge_disposition_id != 'HospiceHome' & discharge_disposition_id != 'HospiceFacility') # Remove cases where the patient died or was sent to hospice
+dim(db.init) # There are now 69973 observations for 50 attributes. Note that in the original research article, they had the same criteria for case removal, but were left with 69984 cases (difference of 11 cases) - unsure at this time as to the reason
+```
+
+# Univariate Analysis with Attribute and Factor Level Reduction
+
+Now that all attributes have the correct data types, let's review the updated structure.
+```{r Review Updated Structure}
+str(db.init)
+```
+
+## Numeric Attributes
+
+First we will create a custom function to calculate Tukey fences so that we may identify outliers.
+```{r Define Custom Function for Fences}
+fences <- function(x){
+  y1 <- unname(summary(x)[2]) - 1.5*(IQR(x)) 
+  y2 <- unname(summary(x)[5]) + 1.5*(IQR(x))
+  z <- c(y1, y2)
+  return(z)
+}
+```
+
+Then we will go through each numeric attribute individually to review the summary statistics, distribution, and outliers. We already know there are no missing values for the numeric attributes.
+
+**Encounter ID and Patient Number**
+```{r Encounter ID and Patient Number}
+length(unique(db.init$patient_nbr)) # Now that the number of unique patient ids matches the number of total observations (69973), there is no further need for the patient number or encounter id attributes. They are not relevant to any analysis, and will be removed for model creation
+```
+
+**Time in Hospital**
+```{r Time in Hospital}
+summary(db.init$time_in_hospital) # Ranges from 1-14, skewed to the right with a median of 3, mean of 4.273
+sd(db.init$time_in_hospital) # Standard deviation of 2.934
+
+boxplot(db.init$time_in_hospital, horizontal = T, col = '#83afe6', xlab = 'Time in Hospital') # Visible outliers above upper fence
+fences(db.init$time_in_hospital) # Lower fence is -4 (below the min), and upper fence is 12
+length(subset(db.init$time_in_hospital, db.init$time_in_hospital > 12)) # 1403 records have a length of stay higher than the upper fence
+
+hist.time_in_hospital <- ggplot(db.init, aes(time_in_hospital)) + geom_histogram(binwidth = 1, color='black', fill = '#83afe6') + theme_bw() + labs(x = 'Time in Hospital', y = 'Count') + theme(axis.title.y = element_blank()) 
+hist.time_in_hospital # Distribution is visibly skewed to the right
+```
+
+**Number of Lab Procedures**
+```{r Number of Lab Procedures}
+summary(db.init$num_lab_procedures) # Ranges from 1-132, with a median of 44, mean of 42.88
+sd(db.init$num_lab_procedures) # Standard deviation of 19.895
+
+boxplot(db.init$num_lab_procedures, horizontal = T, col = '#83afe6', xlab = 'No. Lab Procedures') # Visible outliers above upper fence
+fences(db.init$num_lab_procedures) # Lower fence is -8 (below the min), and upper fence is 96
+length(subset(db.init$num_lab_procedures, db.init$num_lab_procedures > 96)) # 98 records have a number of lab procedures higher than the upper fence
+
+hist.num_lab_procedures <- ggplot(db.init, aes(num_lab_procedures)) + geom_histogram(binwidth = 2, color='black', fill = '#83afe6') + theme_bw() + labs(x = 'No. Lab Procedures', y = 'Count') + theme(axis.title.y = element_blank()) 
+hist.num_lab_procedures # Distribution is unimodal except for large number of values at 1, with outliers visible to the right
+length(subset(db.init$num_lab_procedures, db.init$num_lab_procedures == 1)) # Of note, 2254 patients had only one lab procedure done
+```
+
+**Number of Procedures**
+```{r Number of Procedures}
+summary(db.init$num_procedures) # Ranges from 0-6, with a median of 1, mean of 1.426
+sd(db.init$num_procedures) # Standard deviation of 1.757
+
+boxplot(db.init$num_procedures, horizontal = T, col = '#83afe6', xlab = 'No. Procedures') # Visible outlier(s) above upper fence
+fences(db.init$num_procedures) # Lower fence is -3 (below the min), and upper fence is 5
+length(subset(db.init$num_procedures, db.init$num_procedures > 5)) # 3845 records have a number of lab procedures higher than the upper fence. However, the only value above the upper fence is 6, so these are all patients who had 6 lab procedures done
+
+hist.num_procedures <- ggplot(db.init, aes(num_procedures)) + geom_histogram(binwidth = 1, color='black', fill = '#83afe6') + theme_bw() + labs(x = 'No. Procedures', y = 'Count') + theme(axis.title.y = element_blank()) 
+hist.num_procedures # Distribution is skewed right
+```
+
+**Number of Medications**
+```{r Number of Medications}
+summary(db.init$num_medications) # Ranges from 1-81, with a median of 14, mean of 15.67
+sd(db.init$num_medications) # Standard deviation of 8.287
+
+boxplot(db.init$num_medications, horizontal = T, col = '#83afe6', xlab = 'No. Medications') # Many visible outliers above upper fence
+fences(db.init$num_medications) # Lower fence is -5 (below the min), and upper fence is 35
+length(subset(db.init$num_medications, db.init$num_medications > 35)) # 1867 records have a number of medications higher than the upper fence
+
+hist.num_medications <- ggplot(db.init, aes(num_medications)) + geom_histogram(binwidth = 2, color='black', fill = '#83afe6') + theme_bw() + labs(x = 'No. Medications', y = 'Count') + theme(axis.title.y = element_blank())
+hist.num_medications # Distribution is unimodal and skewed slightly right
+```
+
+**Number of Outpatient Visits**
+```{r Number of Outpatient Visits}
+summary(db.init$number_outpatient) # Ranges from 0-42, with a median of 0, mean of 0.2795
+sd(db.init$number_outpatient) # Standard deviation of 1.064
+
+boxplot(db.init$number_outpatient, horizontal = T, col = '#83afe6', xlab = 'No. Outpatient Visits') # Many visible outliers above upper fence
+fences(db.init$number_outpatient) # Lower fence is 0, and upper fence is 0
+length(subset(db.init$number_outpatient, db.init$number_outpatient != 0)) # 9119 records have a number of outpatient visits higher than the upper fence. I.e., had more than 0 outpatient visits in the last year
+
+hist.number_outpatient <- ggplot(db.init, aes(number_outpatient)) + geom_histogram(binwidth = 2, color='black', fill = '#83afe6') + theme_bw() + labs(x = 'No. Outpatient Visits', y = 'Count') + theme(axis.title.y = element_blank())
+hist.number_outpatient # Most cases are zero
+table(db.init$number_outpatient) # The vast majority of cases (60854) are zero, and the rest of the data is skewed right
+```
+
+**Number of Emergency Visits**
+```{r Number of Emergency Visits}
+summary(db.init$number_emergency) # Ranges from 0-42, with a median of 0, mean of 0.1039
+sd(db.init$number_emergency) # Standard deviation of 0.512
+
+boxplot(db.init$number_emergency, horizontal = T, col = '#83afe6', xlab = 'No. Emergency Visits') # Many visible outliers above upper fence
+fences(db.init$number_emergency) # Lower fence is 0, and upper fence is 0
+length(subset(db.init$number_emergency, db.init$number_emergency != 0)) # 5100 records have a number of emergency visits higher than the upper fence. I.e., had more than 0 emergency visits in the last year
+
+hist.number_emergency <- ggplot(db.init, aes(number_emergency)) + geom_histogram(binwidth = 2, color='black', fill = '#83afe6') + theme_bw() + labs(x = 'No. Emergency Visits', y = 'Count') + theme(axis.title.y = element_blank())
+hist.number_emergency # Most cases are zero
+table(db.init$number_emergency) # The vast majority of cases (64873) are zero, and the rest of the data is skewed right
+```
+
+**Number of Inpatient Visits**
+```{r Number of Inpatient Visits}
+summary(db.init$number_inpatient) # Ranges from 0-12, with a median of 0, mean of 0.1763
+sd(db.init$number_inpatient) # Standard deviation of 0.602
+
+boxplot(db.init$number_inpatient, horizontal = T, col = '#83afe6', xlab = 'No. Inpatient Visits') # Visible outliers above upper fence
+fences(db.init$number_inpatient) # Lower fence is 0, and upper fence is 0
+length(subset(db.init$number_inpatient, db.init$number_inpatient != 0)) # 8191 records have a number of inpatient visits higher than the upper fence. I.e., had more than 0 inpatient visits in the last year
+
+hist.number_inpatient <- ggplot(db.init, aes(number_inpatient)) + geom_histogram(binwidth = 2, color='black', fill = '#83afe6') + theme_bw() + labs(x = 'No. Inpatient Visits') + theme(axis.title.y = element_blank()) + theme(axis.title.y = element_blank())
+hist.number_inpatient # Most casesa are zero
+table(db.init$number_inpatient) # The vast majority of cases (61782) are zero, and the rest of the data is skewed right
+```
+
+**Number of Diagnoses**
+```{r Number of Diagnoses}
+summary(db.init$number_diagnoses) # Ranges from 1-16, with a median of 8, mean of 7.224
+sd(db.init$number_diagnoses) # Standard deviation of 2.001
+
+boxplot(db.init$number_diagnoses, horizontal = T, col = '#83afe6', xlab = 'No. Diagnoses') # Visible outliers above upper fence and below lower fence
+fences(db.init$number_diagnoses) # Lower fence is 1.5, and upper fence is 13.5
+length(subset(db.init$number_diagnoses, db.init$number_diagnoses < 1.5)) # 193 cases are below the lower fence. I.e., 193 people had 1 diagnosis, as 1 is the min
+length(subset(db.init$number_diagnoses, db.init$number_diagnoses > 13.5)) # 42 records have a number of diagnoses higher than the upper fence
+
+hist.number_diagnoses <- ggplot(db.init, aes(number_diagnoses)) + geom_histogram(binwidth = 2, color='black', fill = '#83afe6') + theme_bw() + labs(x = 'No. Diagnoses', y = 'Count') + theme(axis.title.y = element_blank())
+hist.number_diagnoses # Skewed left from 1-9
+table(db.init$number_diagnoses) # From diagnoses 1-9, the data is skewed left. There are very few cases 10 and above. Since there is no biological reason for this, this finding suggests to me that there is some reason coding for more than 9 diagnoses may be difficult in the system, so many practitioners don't bother for an inpatient visit
+length(subset(db.init$number_diagnoses, db.init$number_diagnoses > 9)) # 73 cases have more than 9 diagnoses
+```
+
+The following are grouped visualizations of the numeric attributes above, specifically the histograms and boxplots.
+```{r Grouped Visualizations for Numeric Attributes}
+grid.arrange(hist.time_in_hospital, hist.num_lab_procedures, hist.num_procedures, hist.num_medications, hist.number_outpatient, hist.number_emergency, hist.number_inpatient, hist.number_diagnoses, nrow = 4) # Histograms together
+
+par(mfrow=c(4,2)) # Boxplots together
+boxplot(db.init$time_in_hospital, xlab = 'Time in Hospital', las=1, horizontal = T, col = '#83afe6')
+boxplot(db.init$num_lab_procedures, xlab = 'No. Lab Procedures', las=1, horizontal = T, col = '#83afe6')
+boxplot(db.init$num_procedures, xlab = 'No. Procedures', las=1, horizontal = T, col = '#83afe6')
+boxplot(db.init$num_medications, xlab = 'No. Medications', las=1, horizontal = T, col = '#83afe6')
+boxplot(db.init$number_outpatient, xlab = 'No. Outpatient Visits', las=1, horizontal = T, col = '#83afe6')
+boxplot(db.init$number_emergency, xlab = 'No. Emergency Visits', las=1, horizontal = T, col = '#83afe6')
+boxplot(db.init$number_inpatient, xlab = 'No. Inpatient Visits', las=1, horizontal = T, col = '#83afe6')
+boxplot(db.init$number_diagnoses, xlab = 'No. Diagnoses', las=1, horizontal = T, col = '#83afe6')
+```
+
+Now we'll identify the overall number of outliers for the numeric attributes.
+```{r Outliers for Numeric Attributes}
+nrow(subset(db.init, db.init$time_in_hospital > 12 | db.init$num_lab_procedures > 96 | db.init$num_procedures > 5 | db.init$num_medications > 35 | db.init$number_outpatient != 0 | db.init$number_emergency != 0 | db.init$number_inpatient != 0 | db.init$number_diagnoses < 1.5 | db.init$number_diagnoses > 13.5)) # There are 23159 rows in which at least one outlier is present
+23159/69973 # 33.1% of records in the dataset contain one or more outliers; these will be kept as they may all represent real cases based on their values. Additionally, neural networks are somewhat robust to outliers
+```
+
+We will transfer the numeric attributes kept to a new clean dataframe (db.expl) for further exploratory analysis.
+```{r Transfer Numeric Attributes to Df for Exploration}
+db.expl <- db.init[,c(10, 13:18, 22)]
+```
+
+## Ordinal Attributes
+
+We will go through each ordinal attribute and review frequencies, relative frequencies, missing values, and histograms as appropriate.
+
+**Age**
+```{r Age}
+table(db.init$age) # Most of cases appear to be grouped around ages 50-90 with the 70-80 group being the single largest (15684 cases); there are no missing values
+prop.table(table(db.init$age)) # Largest number of cases is 70-80 at 25.4%
+ggplot(db.init, aes(age)) + geom_bar(color = 'black', fill = '#83afe6') + theme_bw() + labs(x = 'Age', y = 'Count') # Distribution is unimodal and skewed slightly left
+db.expl$age <- db.init$age # Add variable to exploration data frame; no changes needed
+```
+
+**Weight**
+```{r Weight}
+sort(prop.table(table(db.init$weight))) # 96.0% of the data is missing. Attribute will be removed for analysis and modeling
+```
+
+**Max Glucose Serum**
+```{r Max Glucose Serum}
+sort(prop.table(table(db.init$max_glu_serum))) # 95.2% of the time, the test was not taken. This attribute will be removed from analysis due to low variance 
+```
+Any attribute with one category spanning more than 95% of the data will be removed from analysis and modeling due to low variance.
+
+**A1C Result**
+```{r A1C Result}
+sort(prop.table(table(db.init$A1Cresult))) # Test not done 81.6% of the time
+
+db.expl$A1Cresult <- droplevels(fct_collapse(db.init$A1Cresult, '>7' = c('>7', '>8'))) # Put both abnormal results (>7, >8) in the same category, as they are small samples, and I'm interested in an abnormal VS normal result; there's no medical reason for them to be considered separately. These categories will be compared to the test not being done as its own category. Add updated column to db.expl dataframe for exploration
+table(db.expl$A1Cresult)
+sort(prop.table(table(db.expl$A1Cresult)))
+```
+A1C Result will be considered a categorical variable going forward, comparing the categories of the test not being done ('None'), the test done with a normal result ('Norm'), and the test done with an abnormal result ('>7').
+
+## Categorical Attributes
+
+We will go through each categorical attribute and review frequencies and relative frequencies. Any attribute with a small number of missing values will have the missing values imputed as the majority class. Categories will be condensed based on domain knowledge, and then any with under 5% of cases will be grouped into an 'Other' category. Attributes to be kept will be updated in the db.expl dataframe for further exploratory analysis.
+
+**Race**
+```{r Race}
+sort(prop.table(table(db.init$race))) # The highest occurring racial group was Caucasian and 74.7%, followed by African American at 18% and then Unknown ('?') at 2.7%
+db.expl$race <- droplevels(fct_collapse(db.init$race, 'Caucasian' = c('Caucasian', '?'))) # Impute unknown ('?') category as the majority class (Caucasian); will drop any empty levels here too, and add updated column to db.expl dataframe for exploration
+table(db.expl$race) # Review frequencies now that Unknown was imputed
+sort(prop.table(table(db.expl$race))) # Now Caucasian represents 77.5% of cases
+```
+
+**Gender**
+```{r Gender}
+table(db.init$gender) # Only 3 Unknown/Invalid cases
+db.expl$gender <- droplevels(fct_collapse(db.init$gender, 'Female' = c('Female', 'Unknown/Invalid'))) # Impute Unknown/Invalid category as the majority class (Female)
+table(db.expl$gender)
+prop.table(table(db.expl$gender)) #53.2% female, 46.8% male
+```
+
+**Admission Type ID**
+```{r Admission Type ID}
+sort(prop.table(table(db.init$admission_type_id))) # The majority came in through emergency (50.6%); Collectively 11.3% of cases are Not Mapped, Not Available or NULL. These will be assigned to the majority class (Emergency)
+db.expl$admission_type_id <- droplevels(fct_collapse(db.init$admission_type_id, 'Emergency' = c('Emergency', 'NULL', 'NotAvailable', 'NotMapped'), 'Other' = c('TraumaCenter', 'Newborn'))) # Assign missing values to Emergency; add any categories under 5% of cases to "Other"
+table(db.expl$admission_type_id)
+sort(prop.table(table(db.expl$admission_type_id)))
+```
+
+**Discharge Disposition ID**
+```{r Discharge Disposition ID}
+table(db.init$discharge_disposition_id) # There are 26 levels, most of which have very few cases
+sort(prop.table(table(db.init$discharge_disposition_id))) #4.6% of cases unknown between Not Mapped and NULL; will assign to majority class (DcHome)
+db.expl$discharge_disposition_id <- droplevels(fct_collapse(db.init$discharge_disposition_id, 
+  'DcHome' = c('DcHome', 'NULL', 'NotMapped'),
+  'DcHomeWithHomeService' = c('DcHomeWithHomeService', 'DcHomeWithIVCare'),
+  'DcOtherFacility' = c('DcAnotherSTHospital', 'DcICF', 'DcOtherTypeInpatient', 'NeonateDcOtherHospital', 'DcRehab', 'DcLTCHospital', 'DcMedicaidNursingFacility', 'DcFederalHealthFacility', 'DcPsychiatric'),
+  'Other' = c('AdmittedInpatientThisHospital', 'StillPatientOrOutpatient', 'DcWithinSwingBed', 'RefOtherOutpatient', 'RefSameOutpatient', 'LeftAMA'))) # Drop empty levels, and collapse categories based on what logically fits together; add any remaining categories under 5% of cases to "Other"
+table(db.expl$discharge_disposition_id)
+sort(prop.table(table(db.expl$discharge_disposition_id))) #DcHome now has 68.0% of cases
+```
+
+**Admission Source ID**
+```{r Admission Source ID}
+table(db.init$admission_source_id) # There are 17 levels, most of which have very few cases
+sort(prop.table(table(db.init$admission_source_id))) #7.1% of cases unknown between Not Mapped, Not Available, and NULL; will assign to majority class (ER)
+db.expl$admission_source_id <- droplevels(fct_collapse(db.init$admission_source_id, 
+  'ER' = c('ER', 'NotMapped', 'NotAvailable', 'NULL'),
+  'TransferExtFacility' = c('TransferFromHospital', 'TransferFromOtherHealthFacility', 'TransferFromSNF', 'ClinicRef', 'HMORef', 'TransferFromCriticalAccessHospital', 'TransferFromAmbSurg'),
+  'Other' = c('CourtOrLawEnf', 'NormalDelivery', 'SickBaby', 'ExtramuralBirth', 'SepClaim'))) # Drop empty levels, and collapse categories based on what logically fits together; add any remaining categories under 5% of cases to "Other"
+table(db.expl$admission_source_id)
+sort(prop.table(table(db.expl$admission_source_id)))
+```
+
+**Payer Code**
+```{r Payer Code}
+levels(db.init$payer_code) # 18 Levels; unsure of what codes mean as most are not standardized and the original researchers gave no indication
+sort(prop.table(table(db.init$payer_code))) # Given the attribute is 43.5% missing, and we are unable to determine with any certainty the meanings behind categories, the attribute will not be used for analysis or modeling
+```
+
+**Medical Specialty**
+```{r Medical Specialty}
+levels(db.init$medical_specialty) # 73 categories
+sort(prop.table(table(db.init$medical_specialty))) # 48.1% missing ('?'), and may be related to primary diagnosis (another attribute we have); attribute to be removed for analysis and modeling
+```
+
+**Diagnosis 1**
+```{r Diagnosis 1}
+length(levels(db.init$diag_1)) # 717 distinct primary diagnoses; a bit cumbersome to analyze
+sort(table(db.init$diag_1)) # Code 414 has the highest number of cases (5209), which is "Other forms of chronic ischemic heart disease". Next is code 428 at 3876 records, which is Heart Failure. 3rd highest is code 786 at 3040 records, which is "Symptoms involving respiratory system and other chest symptoms". Diabetes mellitus appears to have several thousand cases as well, but we can't easily tell as it's broken up into about 10 categories (250, 250.xx)
+
+# We will create a new attribute with larger categories for the diagnoses so they are less cumbersome. The categories will be based on ICD-9-CM categories, with the exception of diabetes mellitus as its own category so that it may be analyzed. The unknown category ('?') will be kept for this step. Unfortunately, we have to use Regex to condense the categories as the attribute is currently a factor with some categories containing letters
+db.expl$diag_1 <- rep('?', times = nrow(db.init))
+db.expl$diag_1[grepl("^0|^[^EeVv?]$|^[^EeVv][0-9]$|^1[0123][0-9]$",db.init$diag_1)] <- "001-139"
+db.expl$diag_1[grepl("^1[4-9][0-9]$|^2[0-3][0-9]$",db.init$diag_1)] <- "140-239"
+db.expl$diag_1[grepl("^250.*",db.init$diag_1)] <- "250.0-250.9"
+db.expl$diag_1[grepl("^2[467][0-9]$|^25[1-9]$",db.init$diag_1)] <- "240-279(not250)"
+db.expl$diag_1[grepl("^28[0-9]$",db.init$diag_1)] <- "280-289"
+db.expl$diag_1[grepl("^29[0-9]$|^3[01][0-9]$",db.init$diag_1)] <- "290-319"
+db.expl$diag_1[grepl("^3[2-8][0-9]$",db.init$diag_1)] <- "320-389"
+db.expl$diag_1[grepl("^39[0-9]$|^4[0-5][0-9]$",db.init$diag_1)] <- "390-459"
+db.expl$diag_1[grepl("^4[6-9][0-9]$|^5[01][0-9]$",db.init$diag_1)] <- "460-519"
+db.expl$diag_1[grepl("^5[2-7][0-9]$",db.init$diag_1)] <- "520-579"
+db.expl$diag_1[grepl("^5[89][0-9]$|^6[0-2][0-9]$",db.init$diag_1)] <- "580-629"
+db.expl$diag_1[grepl("^6[3-7][0-9]$",db.init$diag_1)] <- "630-679"
+db.expl$diag_1[grepl("^6[89][0-9]$|^70[0-9]$",db.init$diag_1)] <- "680-709"
+db.expl$diag_1[grepl("^7[1-3][0-9]$",db.init$diag_1)] <- "710-739"
+db.expl$diag_1[grepl("^7[45][0-9]$",db.init$diag_1)] <- "740-759"
+db.expl$diag_1[grepl("^7[67][0-9]$",db.init$diag_1)] <- "760-779"
+db.expl$diag_1[grepl("^7[89][0-9]$",db.init$diag_1)] <- "780-799"
+db.expl$diag_1[grepl("^[89][0-9]{2}$",db.init$diag_1)] <- "800-999"
+db.expl$diag_1[grepl("^[Vv]",db.init$diag_1)] <- "V01-V91"
+db.expl$diag_1[grepl("^[Ee]",db.init$diag_1)] <- "E000-E999"
+
+db.expl$diag_1 <- as.factor(db.expl$diag_1) # Convert from character to factor
+levels(db.expl$diag_1) # Now has 20 levels
+sort(prop.table(table(db.expl$diag_1))) # Largest group of people had a primary diagnosis of a circulatory disorder (30.5%); 0.001% of cases are missing; will impute to majority class (390-459)
+ggplot(db.expl, aes(fct_infreq(diag_1))) + geom_bar(color = 'black', fill = '#83afe6') + theme_bw() + labs(x = 'Primary Diagnosis', y = 'Count') + theme(axis.text.x = element_text(angle = 90, hjust = 1)) # Visualize groups
+
+# Want to reduce the levels further; will group anything under 5% into an "Other" category
+diag1levels <- levels(db.expl$diag_1)[c(2:4,6:8,12:14,16,19,20)] 
+db.expl$diag_1 <- droplevels(fct_collapse(db.expl$diag_1, '390-459' = c('390-459', '?'), 'Other' = diag1levels)) # Drop empty levels, and collapse categories - kept the categories over 5%; put rest in "Other"
+levels(db.expl$diag_1) #Reduced to 8 levels to be more manageable for modeling
+table(db.expl$diag_1)
+sort(prop.table(table(db.expl$diag_1))) # Other category contains 22.7% of cases
+```
+
+**Diagnosis 2**
+```{r Diagnosis 2}
+length(levels(db.init$diag_2)) # 749 distinct secondary diagnoses
+sort(table(db.init$diag_2)) # Code 250 has the highest number of cases (4996); however, there are likely more, as 250 is split into around 10 categories. The second highest is 276 (4494 cases), which is "Disorders of fluid electrolyte and acid-base balance". Third highest is code 428 (4218 cases), which is Heart Failure.
+
+
+# Same as for diagnosis 1, we will create a new attribute with larger categories for the diagnoses.
+db.expl$diag_2 <- rep('?', times = nrow(db.init))
+db.expl$diag_2[grepl("^0|^[^EeVv?]$|^[^EeVv][0-9]$|^1[0123][0-9]$",db.init$diag_2)] <- "001-139"
+db.expl$diag_2[grepl("^1[4-9][0-9]$|^2[0-3][0-9]$",db.init$diag_2)] <- "140-239"
+db.expl$diag_2[grepl("^250.*",db.init$diag_2)] <- "250.0-250.9"
+db.expl$diag_2[grepl("^2[467][0-9]$|^25[1-9]$",db.init$diag_2)] <- "240-279(not250)"
+db.expl$diag_2[grepl("^28[0-9]$",db.init$diag_2)] <- "280-289"
+db.expl$diag_2[grepl("^29[0-9]$|^3[01][0-9]$",db.init$diag_2)] <- "290-319"
+db.expl$diag_2[grepl("^3[2-8][0-9]$",db.init$diag_2)] <- "320-389"
+db.expl$diag_2[grepl("^39[0-9]$|^4[0-5][0-9]$",db.init$diag_2)] <- "390-459"
+db.expl$diag_2[grepl("^4[6-9][0-9]$|^5[01][0-9]$",db.init$diag_2)] <- "460-519"
+db.expl$diag_2[grepl("^5[2-7][0-9]$",db.init$diag_2)] <- "520-579"
+db.expl$diag_2[grepl("^5[89][0-9]$|^6[0-2][0-9]$",db.init$diag_2)] <- "580-629"
+db.expl$diag_2[grepl("^6[3-7][0-9]$",db.init$diag_2)] <- "630-679"
+db.expl$diag_2[grepl("^6[89][0-9]$|^70[0-9]$",db.init$diag_2)] <- "680-709"
+db.expl$diag_2[grepl("^7[1-3][0-9]$",db.init$diag_2)] <- "710-739"
+db.expl$diag_2[grepl("^7[45][0-9]$",db.init$diag_2)] <- "740-759"
+db.expl$diag_2[grepl("^7[67][0-9]$",db.init$diag_2)] <- "760-779"
+db.expl$diag_2[grepl("^7[89][0-9]$",db.init$diag_2)] <- "780-799"
+db.expl$diag_2[grepl("^[89][0-9]{2}$",db.init$diag_2)] <- "800-999"
+db.expl$diag_2[grepl("^[Vv]",db.init$diag_2)] <- "V01-V91"
+db.expl$diag_2[grepl("^[Ee]",db.init$diag_2)] <- "E000-E999"
+
+db.expl$diag_2 <- as.factor(db.expl$diag_2) # Convert from character to factor
+levels(db.expl$diag_2) # Now has 20 levels
+sort(prop.table(table(db.expl$diag_2))) # Largest group of people had a secondary diagnosis of a circulatory disorder (31.1%); 0.4% missing, will impute to majority class (390-459)
+ggplot(db.expl, aes(fct_infreq(diag_2))) + geom_bar(color = 'black', fill = '#83afe6') + theme_bw() + labs(x = 'Secondary Diagnosis', y = 'Count') + theme(axis.text.x = element_text(angle = 90, hjust = 1)) # Visualize groups
+
+# Want to reduce the levels further; will group anything under 5% into an "Other" category
+diag2levels <- levels(db.expl$diag_2)[c(2,3,6:8,11,13:20)] 
+db.expl$diag_2 <- droplevels(fct_collapse(db.expl$diag_2, '390-459' = c('390-459', '?'), Other = diag2levels)) # Drop empty levels, and collapse categories - kept the categories over 5%; put rest in "Other"
+levels(db.expl$diag_2) #Reduced to 6 levels
+table(db.expl$diag_2)
+sort(prop.table(table(db.expl$diag_2))) # Other category contains 30.2% of cases
+```
+
+**Diagnosis 3**
+```{r Diagnosis 3}
+length(levels(db.init$diag_3)) # 790 distinct tertiary diagnoses
+sort(table(db.init$diag_3)) # Code 250 has the highest number of cases (8980); however, there are likely more, as 250 is split into around 10 categories. The second highest is 401 (6549 cases), which is "Essential hypertension". Third highest is code 276 (3302 cases), which is "Disorders of fluid electrolyte and acid-base balance"
+
+
+# Same as for diagnosis 1 and 2, we will create a new attribute with larger categories for the diagnoses.
+db.expl$diag_3 <- rep('?', times = nrow(db.init))
+db.expl$diag_3[grepl("^0|^[^EeVv?]$|^[^EeVv][0-9]$|^1[0123][0-9]$",db.init$diag_3)] <- "001-139"
+db.expl$diag_3[grepl("^1[4-9][0-9]$|^2[0-3][0-9]$",db.init$diag_3)] <- "140-239"
+db.expl$diag_3[grepl("^250.*",db.init$diag_3)] <- "250.0-250.9"
+db.expl$diag_3[grepl("^2[467][0-9]$|^25[1-9]$",db.init$diag_3)] <- "240-279(not250)"
+db.expl$diag_3[grepl("^28[0-9]$",db.init$diag_3)] <- "280-289"
+db.expl$diag_3[grepl("^29[0-9]$|^3[01][0-9]$",db.init$diag_3)] <- "290-319"
+db.expl$diag_3[grepl("^3[2-8][0-9]$",db.init$diag_3)] <- "320-389"
+db.expl$diag_3[grepl("^39[0-9]$|^4[0-5][0-9]$",db.init$diag_3)] <- "390-459"
+db.expl$diag_3[grepl("^4[6-9][0-9]$|^5[01][0-9]$",db.init$diag_3)] <- "460-519"
+db.expl$diag_3[grepl("^5[2-7][0-9]$",db.init$diag_3)] <- "520-579"
+db.expl$diag_3[grepl("^5[89][0-9]$|^6[0-2][0-9]$",db.init$diag_3)] <- "580-629"
+db.expl$diag_3[grepl("^6[3-7][0-9]$",db.init$diag_3)] <- "630-679"
+db.expl$diag_3[grepl("^6[89][0-9]$|^70[0-9]$",db.init$diag_3)] <- "680-709"
+db.expl$diag_3[grepl("^7[1-3][0-9]$",db.init$diag_3)] <- "710-739"
+db.expl$diag_3[grepl("^7[45][0-9]$",db.init$diag_3)] <- "740-759"
+db.expl$diag_3[grepl("^7[67][0-9]$",db.init$diag_3)] <- "760-779"
+db.expl$diag_3[grepl("^7[89][0-9]$",db.init$diag_3)] <- "780-799"
+db.expl$diag_3[grepl("^[89][0-9]{2}$",db.init$diag_3)] <- "800-999"
+db.expl$diag_3[grepl("^[Vv]",db.init$diag_3)] <- "V01-V91"
+db.expl$diag_3[grepl("^[Ee]",db.init$diag_3)] <- "E000-E999"
+
+db.expl$diag_3 <- as.factor(db.expl$diag_3) # Convert from character to factor
+levels(db.expl$diag_3) # Now has 20 levels
+sort(prop.table(table(db.expl$diag_3))) # Largest group of people had a tertiary diagnosis of a circulatory disorder (29.5%); 1.8% missing values, will be imputed to majority class (390-459)
+ggplot(db.expl, aes(fct_infreq(diag_3))) + geom_bar(color = 'black', fill = '#83afe6') + theme_bw() + labs(x = 'Tertiary Diagnosis', y = 'Count') + theme(axis.text.x = element_text(angle = 90, hjust = 1)) # Visualize groups
+
+# Want to reduce the levels further; will group anything under 5% into an "Other" category
+diag3levels <- levels(db.expl$diag_3)[c(2,3,6:8,11,13:20)] 
+db.expl$diag_3 <- droplevels(fct_collapse(db.expl$diag_3, '390-459' = c('390-459', '?'), 'Other' = diag3levels)) # Drop empty levels, and collapse categories - kept the categories over 5%; put rest in "Other"
+levels(db.expl$diag_3) #Reduced to 6 levels
+table(db.expl$diag_3)
+sort(prop.table(table(db.expl$diag_3))) # Other category contains 30.2% of cases
+```
+
+**Individual Medication Attributes**
+```{r Individual Medication Attributes}
+for(i in 25:47){
+  x <- colnames(db.init[i])
+  y <- sort(table(db.init[i]))
+  z <- sort(prop.table(table(db.init[i])))
+  print(c(x, y, z))
+} # Review the name, frequency, and relative frequency for each individual medication. Each attribute has four levels: Down, Up, Steady, and No
+
+# Any attribute with one category encompassing 95% of the records or greater will be removed for modeling due to low variance. This includes 16 of the 23 medications: Repaglinide, Nateglinide, Chlorpropamide, Acetohexamide, Tolbutamide, Acarbose, Miglitol, Troglitazone, Tolazamide, Examide, Citoglipton, Glyburide-metformin, Glipizide-metformin, Glimepiride-pioglitazone, Metformin-rosiglitazone, and Metformin-pioglitazone
+
+# Add medication attributes to keep for exploratory analysis to db.expl
+db.expl$metformin <- db.init$metformin
+db.expl$glimepiride <- db.init$glimepiride
+db.expl$glipizide <- db.init$glipizide
+db.expl$glyburide <- db.init$glyburide
+db.expl$pioglitazone <- db.init$pioglitazone
+db.expl$rosiglitazone <- db.init$rosiglitazone
+db.expl$insulin <- db.init$insulin
+```
+
+**Change in Medication**
+```{r Change in Medication}
+table(db.init$change)
+sort(prop.table(table(db.init$change))) # The two categories are pretty evenly split. 45.0% had a change in diabetic medication and 55.0% did not
+db.expl$change <- db.init$change # Add to exploration data frame
+```
+
+**Diabtes Medication**
+```{r Diabetes Medication}
+table(db.init$diabetesMed)
+sort(prop.table(table(db.init$diabetesMed))) #76.2% of patients are taking a diabetic medication; 23.8% are not
+db.expl$diabetesMed <- db.init$diabetesMed # Add to exploration data frame
+```
+
+## Target Variable (Categorical)
+
+```{r Target Variable: Readmitted}
+table(db.init$readmitted) # There are currently 3 levels: readmitted within 30 days, readmitted after 30 days, and no readmission.
+
+# '>30' and 'NO' will be grouped together, as the purpose of analysis is to compare patients readmitted within 30 days to those who were not
+db.expl$readmitted <- fct_collapse(db.init$readmitted, 'Not<30' = c('>30', 'NO')) 
+table(db.expl$readmitted)
+sort(prop.table(table(db.expl$readmitted))) # The target attribute is imbalanced, with only 9.0% of the patients having been readmitted within 30 days, whereas 91.0% were not
+```
+
+## Exploration Dataframe Created
+
+Now that we have condensed categories for certain variables, and removed attributes that were irrelevant, had a large number of missing values, or had low variance, let's review the final structure of the dataset to be used for exploratory analysis (db.expl).
+```{r Exploration Data Frame Structure and Export}
+str(db.expl) # We now have a dataframe with 28 variables and 69973 records ready for further exploratory analysis
+#write.csv(db.expl, '/Users/amyhowe/Desktop/Dataset_Exploration.csv', row.names = F) # Export dataset if desired
+```
+
+# Bivariate Analysis
+
+## Correlation of Numeric Attributes
+
+```{r Correlation for Numeric Attributes}
+rcorr(as.matrix(db.expl[,c(1:8)]), type = 'spearman') # No strong monotonic correlations. There are moderate correlations between number of medications and time in hospital (0.46), number of medications and number of procedures (0.37), and number of lab procedures and time in hospital (0.35). The rest are weak correlations. There is 0 correlation between time in hospital and number of emergency visits, but this is NOT statistically significant (p = 0.283). The same applies for number of procedures and number of lab procedures (p = 0.309). The rest of the findings are highly significant (p<0.01)
+
+corr <- round(cor(db.expl[,c(1:8)], method = 'spearman'), 2)
+ggcorrplot(corr, hc.order = TRUE, type = "lower", lab = TRUE) # Visualize the correlation heatmap
+```
+
+## Variables by Readmission Status
+
+We will compare each variable against the target variable (readmitted) to identify differences between the two groups: patients who were readmitted within 30 days, and patients who weren't.
+
+### Numeric Variables by Readmission Status
+
+For numeric variables, the count, mean, standard deviation, and boxplots will be compared between both groups. Additionally, a sample t-test will be completed to test for a statistically significant difference between the two groups.
+
+**Time in Hospital VS Readmitted**
+```{r Time in Hospital VS Readmitted}
+group_by(db.expl, readmitted) %>%
+  summarise(count = n(), mean = mean(time_in_hospital), sd = sd(time_in_hospital)) # The mean for time in hospital for the <30 group is slightly higher than the not readmitted group, with a slightly higher standard deviation as well.
+
+boxplot(time_in_hospital~readmitted, data=db.expl, horizontal = T, col = '#83afe6', xlab = "Time in Hospital", ylab = "Readmission Status") # Visualize the two groups
+
+# Test whether the mean of the <30 group is significantly higher than the Not<30 group; no need to test for normality as sample sizes are large (central limit theorem). First check to see if the variances are equal using an f-test to inform the t-test arguments
+var.test(time_in_hospital ~ readmitted, data = db.expl) # Variances are not equal (p=2.644e-07)
+t.test(db.expl$time_in_hospital[db.expl$readmitted == "<30"], db.expl$time_in_hospital[db.expl$readmitted == "Not<30"], alternative = "greater", var.equal = FALSE) # The finding that the mean for the <30 group is higher than the Not<30 group is highly significant (p<2.2e-16). Therefore, there is a longer average length of stay for patients who are readmitted within 30 days
+```
+
+**Number of Lab Procedures VS Readmitted**
+```{r Number of Lab Procedures VS Readmitted}
+group_by(db.expl, readmitted) %>%
+  summarise(count = n(), mean = mean(num_lab_procedures), sd = sd(num_lab_procedures)) # The mean for number of lab procedures for the <30 group is slightly higher than the not readmitted group, with a slightly lower standard deviation
+
+boxplot(num_lab_procedures~readmitted, data=db.expl, horizontal = T, col = '#83afe6', xlab = "Number of Lab Procedures", ylab = "Readmission Status")
+
+var.test(num_lab_procedures ~ readmitted, data = db.expl) # Variances of the two groups are not equal (p=0.001259)
+t.test(db.expl$num_lab_procedures[db.expl$readmitted == "<30"], db.expl$num_lab_procedures[db.expl$readmitted == "Not<30"], alternative = "greater", var.equal = FALSE) # The finding that the mean for the <30 group is higher than the Not<30 group is highly significant (p<2.2e-16). Therefore, there is a higher average number of lab procedures completed for patients who are readmitted within 30 days
+```
+
+**Number of Procedures VS Readmitted**
+```{r Number of Procedures VS Readmitted}
+group_by(db.expl, readmitted) %>%
+  summarise(count = n(), mean = mean(num_procedures), sd = sd(num_procedures)) # The means and standard deviations are very close for both groups
+
+boxplot(num_procedures~readmitted, data=db.expl, horizontal = T, col = '#83afe6', xlab = "Number of Procedures", ylab = "Readmission Status") # Distributions look identical
+
+var.test(num_procedures ~ readmitted, data = db.expl) # Fail to reject the null hypothesis that the variances are equal (p=0.07307)
+t.test(num_procedures~readmitted, data=db.expl, var.equal = TRUE) # Fail to reject the null hypothesis that the means are the same (p=0.9695)
+```
+
+**Number of Medications VS Readmitted**
+```{r Number of Medications VS Readmitted}
+group_by(db.expl, readmitted) %>%
+  summarise(count = n(), mean = mean(num_medications), sd = sd(num_medications)) # The mean and standard deviation of the <30 group is slightly higher
+
+boxplot(num_medications~readmitted, data=db.expl, horizontal = T, col = '#83afe6', xlab = "Number of Medications", ylab = "Readmission Status") # Distributions look similar
+
+var.test(num_medications ~ readmitted, data = db.expl) # Fail to reject the null hypothesis that the variances are equal (p=0.5465)
+t.test(db.expl$num_medications[db.expl$readmitted == "<30"], db.expl$num_medications[db.expl$readmitted == "Not<30"], alternative = "greater", var.equal = TRUE)  # The results are highly significant (p<2.2e-16) that the mean of the <30 group is greater than the Not<30 group. Therefore, the average number of medications for those readmitted within 30 days is higher than those not readmitted within 30 days
+```
+
+**Number of Outpatient Visits VS Readmitted**
+```{r Number of Outpatient Visits VS Readmitted}
+group_by(db.expl, readmitted) %>%
+  summarise(count = n(), mean = mean(number_outpatient), sd = sd(number_outpatient)) # The mean of the <30 group is slightly higher, while the sd is slightly lower
+
+boxplot(number_outpatient~readmitted, data=db.expl, horizontal = T, col = '#83afe6', xlab = "Number of Outpatient Visits", ylab = "Readmission Status") # Distributions look similar, with fewer outliers for <30
+
+var.test(number_outpatient ~ readmitted, data = db.expl) # Can reject the null hypothesis at the alpha=0.05 level that the variances are equal (p=0.03272)
+t.test(db.expl$number_outpatient[db.expl$readmitted == "<30"], db.expl$number_outpatient[db.expl$readmitted == "Not<30"], alternative = "greater", var.equal = FALSE)  # The results are statistically significant (p=0.01096) that the mean of the <30 group is greater than the Not<30 group. Therefore, the average number of outpatient visits in the last year for those readmitted within 30 days is higher than those not readmitted within 30 days.
+```
+
+**Number of Emergency Visits VS Readmitted**
+```{r Number of Emergency Visits VS Readmitted}
+group_by(db.expl, readmitted) %>%
+  summarise(count = n(), mean = mean(number_emergency), sd = sd(number_emergency)) # The mean and standard deviation of the <30 group are higher
+
+boxplot(number_emergency~readmitted, data=db.expl, horizontal = T, col = '#83afe6', xlab = "Number of Emergency Visits", ylab = "Readmission Status") # Distributions look similar, with fewer outliers for <30
+
+var.test(number_emergency ~ readmitted, data = db.expl) # Cannot consider the variances to be equal (p<2.2e-16)
+t.test(db.expl$number_emergency[db.expl$readmitted == "<30"], db.expl$number_emergency[db.expl$readmitted == "Not<30"], alternative = "greater", var.equal = FALSE)  # The results are highly significant (p=2.016e-11) that the mean of the <30 group is greater than the Not<30 group. Therefore, the average number of emergency visits in the last year for those readmitted within 30 days is higher than those not readmitted within 30 days
+```
+
+**Number of Inpatient Visits VS Readmitted**
+```{r Number of Inpatient Visits VS Readmitted}
+group_by(db.expl, readmitted) %>%
+  summarise(count = n(), mean = mean(number_inpatient), sd = sd(number_inpatient)) # The mean of the <30 group is over double the mean of Not<30. The sd is higher as well
+
+boxplot(number_inpatient~readmitted, data=db.expl, horizontal = T, col = '#83afe6', xlab = "Number of Inpatient Visits", ylab = "Readmission Status") # We're not able to see much here
+
+var.test(number_inpatient ~ readmitted, data = db.expl) # Variances are not equal (p<2.2e-16)
+t.test(db.expl$number_inpatient[db.expl$readmitted == "<30"], db.expl$number_inpatient[db.expl$readmitted == "Not<30"], alternative = "greater", var.equal = FALSE)  # The findings are highly significant (p<2.2e-16) that the mean of the <30 group is greater than the Not<30 group. Therefore, the average number of inpatient visits in the last year for those readmitted within 30 days is higher than those not readmitted within 30 days
+```
+
+**Number of Diagnoses VS Readmitted**
+```{r Number of Diagnoses VS Readmitted}
+group_by(db.expl, readmitted) %>%
+  summarise(count = n(), mean = mean(number_diagnoses), sd = sd(number_diagnoses)) # The mean of the <30 group is higher than the Not<30 group while the sd is lower
+
+boxplot(number_diagnoses~readmitted, data=db.expl, horizontal = T, col = '#83afe6', xlab = "Number of Diagnoses", ylab = "Readmission Status") # The distributions appear identical here
+
+var.test(number_diagnoses ~ readmitted, data = db.expl) # Variances are not equal (p<2.2e-16)
+t.test(db.expl$number_diagnoses[db.expl$readmitted == "<30"], db.expl$number_diagnoses[db.expl$readmitted == "Not<30"], alternative = "greater", var.equal = FALSE)  # Highly significant (p<2.2e-16) that the mean of the <30 group is greater than the Not<30 group. Therefore, the average number of diagnoses for those readmitted within 30 days is higher than those not readmitted within 30 days
+```
+
+### Ordinal Variable by Readmission Status
+
+For the one remaining ordinal variable, age, the frequencies and histograms of each group will be reviewed, and a wilcoxon rank sum test will be completed to identify if there is a statistically significant difference between the two groups.
+
+**Age VS Readmitted**
+```{r Age VS Readmitted}
+table(db.expl$age, db.expl$readmitted) # Values appear to peak similarly in the 70-80 range
+
+ggplot(subset(db.expl, db.expl$readmitted == "<30"), aes(age)) + geom_bar(color = 'black', fill = '#83afe6') + theme_bw() + labs(x = 'Age in Readmitted Group', y = 'Count')
+ggplot(subset(db.expl, db.expl$readmitted == "Not<30"), aes(age)) + geom_bar(color = 'black', fill = '#83afe6') + theme_bw() + labs(x = 'Age in Not Readmitted Group', y = 'Count') # The distribution of the readmitted in <30 days group appears to have a bit more weight to the right than the other group
+
+age.numeric <- as.numeric(db.expl$age) # Convert Age to its ordered IDs (1-10) so that it may be used with the wilcoxon rank sum test function
+wilcox.test(age.numeric~db.expl$readmitted, alternative = 'greater', paired = F) # Findings are highly significant (p<2.2e-16) that the center of the <30 group is greater than the center of the Not<30 group. Therefore, patients who have been readmitted within 30 days are generally older
+```
+
+### Categorical Variables by Readmission Status
+
+First we will define a custom function to be used to calculate the percent contribution of each cell of a table to the chi-squared test statistic to identify combinations of categories with the highest contributions.
+```{r Define Custom Function for Percentage Contribution of Pearson Residuals}
+percent_contrib <- function(x) {
+  y <- 100*x$residuals^2/x$statistic
+  return(round(y, 3))
+}
+```
+
+For each categorical variable, we will review the frequencies for each readmission group, complete a chi-squared test to identify if the groups have a statistically significant difference, and then, if the findings are statistically significant, review the percent contribution and residuals of cells to identify associations between categories of the variables.
+
+**Race VS Readmitted**
+```{r Race VS Readmitted}
+table(db.expl$race, db.expl$readmitted)
+race_readm.chisq <- chisq.test(table(db.expl$race, db.expl$readmitted))
+race_readm.chisq # The results are statistically significant at the alpha = 0.05 level (p=0.0311), indicating that there is a statistically significant association between the two variables (i.e., they are not independent)
+percent_contrib(race_readm.chisq) # The percent contribution (100*residual^2/chi-squared) indicates that the number of patients who identified their race as "Other" and were readmitted within 30 days contributed most to the total chi-square score (53.3%). Caucasian (12.1%), African American (13.0%), and Hispanic (11.0%) with <30 each contributed similarly.
+round(race_readm.chisq$residuals,2) # We can see that since the residual is negative for the Other, <30 cell, there were fewer people observed than expected, indicating a negative association. Otherwise, we can see from the residuals that there was a positive association for Caucasian and <30, and a negative association for Aftrican American and Hispanic with <30. I.e., more Caucasian patients were readmitted within 30 days than expected, and fewer African American, Hispanic, and "Other" patients were. This could make sense given that in the U.S., ethnic minorities are more likely to be of a lower socioeconomic status, and therefore are less likely to have health insurance and feel comfortable seeking care
+```
+
+**Gender VS Readmitted**
+```{r Gender VS Readmitted}
+table(db.expl$gender, db.expl$readmitted)
+chisq.test(table(db.expl$gender, db.expl$readmitted)) # The chi-squared test is not statistically significant (p=0.5856), indicating that we cannot reject the null hypothesis that the two variables are independent
+```
+
+**Admission Type ID VS Readmitted**
+```{r Admission Type ID VS Readmitted, warning=FALSE}
+table(db.expl$admission_type_id, db.expl$readmitted)
+admtype_readm.chisq <- chisq.test(table(db.expl$admission_type_id, db.expl$readmitted))
+admtype_readm.chisq # The results are highly significant (p=0.008417), indicating that there is an association between the two variables
+percent_contrib(admtype_readm.chisq) # The percent contribution indicates that the number of patients who were readmitted within 30 days for elective reasons contributed the most (63.1%), with those readmitted within 30 days through emergency contributing the next most (20.8%)
+round(admtype_readm.chisq$residuals,2) # The residual is negative for <30, Elective, indicating that the number seen is less than expected. The residual is positive for <30, Emergency, indicating more people were admitted through emergency than expected. These findings suggest that if you are admitted to hospital for planned reasons, you are less likely to be readmitted within 30 days
+```
+
+**Discharge Disposition ID VS Readmitted**
+```{r Discharge Disposition ID VS Readmitted}
+table(db.expl$discharge_disposition_id, db.expl$readmitted)
+dcid_readm.chisq <- chisq.test(table(db.expl$discharge_disposition_id, db.expl$readmitted))
+dcid_readm.chisq # The results are highly significant (p<2.2e-16), indicating that there is an association between the two variables
+percent_contrib(dcid_readm.chisq) # DcOtherFacility, <30 has the highest percent contribution (48.8%) with DcSNF (20.8%) and DcHome (20.3%) following
+round(dcid_readm.chisq$residuals,2) # There is a negative association between DcHome and <30, and a positive association between each DcOtherFacility and DcSNF with <30. This indicates that in the <30 days readmitted group, there were fewer people than expected discharged home, with more people than expected discharged to a Skilled Nursing Facility or other facility
+```
+
+**Admission Source ID VS Readmitted**
+```{r Admission Source ID VS Readmitted, warning=FALSE}
+table(db.expl$admission_source_id, db.expl$readmitted)
+admsource_readm.chisq <- chisq.test(table(db.expl$admission_source_id, db.expl$readmitted))
+admsource_readm.chisq # The results are not statistically significant at the alpha = 0.05 level (p=0.0555), although they are tending towards significance
+```
+
+**Diagnosis 1 VS Readmitted**
+```{r Diagnosis 1 VS Readmitted}
+table(db.expl$diag_1, db.expl$readmitted)
+d1_readm.chisq <- chisq.test(table(db.expl$diag_1, db.expl$readmitted))
+d1_readm.chisq # The results are highly significant (p<2.2e-16), indicating that there is an association between the two variables
+percent_contrib(d1_readm.chisq) # 780-799 (Symptoms, Signs, And Ill-Defined Conditions), <30 has the highest percent contribution (47.0%), with 800-999 (Injury And Poisoning), <30 (17.7%) and 390-459 (Diseases Of The Circulatory System), <30 (12.8%) following
+round(d1_readm.chisq$residuals,2) # There is a negative association between 780-799 and <30, and a positive association for each 800-999 and 390-459 with <30. Therefore, in the readmitted within 30 days group, there are fewer patients than expected with a primary diagnosis of Symptoms, Signs, And Ill-Defined Conditions, and more patients than expected with Injury and Poisoning, or a circulatory disorder
+```
+
+**Diagnosis 2 VS Readmitted**
+```{r Diagnosis 2 VS Readmitted}
+table(db.expl$diag_2, db.expl$readmitted)
+d2_readm.chisq <- chisq.test(table(db.expl$diag_2, db.expl$readmitted))
+d2_readm.chisq # The results are statistically significant at the alpha = 0.05 level (p=0.03454), indicating that there is an association between the two variables
+percent_contrib(d2_readm.chisq) # 240-279(not250) (Endocrine, Nutritional And Metabolic Diseases, And Immunity Disorders) with <30 has the highest percent contribution (36.3%), with Other, <30 (22.6%) and 250.0-250.0 (Diabetes Mellitus), <30 (17.8%) following
+round(d2_readm.chisq$residuals,2) # There are fewer patients than expected in those who are readmitted with a secondary diagnosis of Diabetes Mellitus or Endocrine, Nutritional And Metabolic Diseases, And Immunity Disorders, and more than expected with "Other"
+```
+
+**Diagnosis 3 VS Readmitted**
+```{r Diagnosis 3 VS Readmitted}
+table(db.expl$diag_3, db.expl$readmitted)
+d3_readm.chisq <- chisq.test(table(db.expl$diag_3, db.expl$readmitted))
+d3_readm.chisq # The results are highly significant (p=3.032e-06), indicating that there is an association between the two variables
+percent_contrib(d3_readm.chisq) # 460-519 (Diseases Of The Respiratory System) with <30 has the highest percent contribution (31.3%), with 240-279(not250) (Endocrine, Nutritional And Metabolic Diseases, And Immunity Disorders), <30 (27.3%) following 
+round(d3_readm.chisq$residuals,2) # There are more patients than expected in those who are readmitted with a tertiary diagnosis of Diseases Of The Respiratory System, and fewer than expected with Endocrine, Nutritional And Metabolic Diseases, And Immunity Disorders
+```
+
+**Result VS Readmitted**
+```{r A1c Result VS Readmitted}
+table(db.expl$A1Cresult, db.expl$readmitted)
+A1C_readm.chisq <- chisq.test(table(db.expl$A1Cresult, db.expl$readmitted))
+A1C_readm.chisq # The results are statistically significant at the alpha = 0.05 level (p=0.03305), indicating that there is an association between the two variables
+percent_contrib(A1C_readm.chisq) # >7 (abnormal HbA1c result) and <30 has the highest percent contribution (68.3%)
+round(A1C_readm.chisq$residuals,2) # There is a negative association between >7 and <30, indicating that patients who were readmitted within 30 days were less likely than expected to have an abnormal HbA1c result. This is very interesting. It appears that having an abnormal result may be a protective factor to getting readmitted. This would likely be because as a result of the abnormal finding, some change was made to the patient's treatment regimen leading to better controlled diabetes and a reduction in complications. It is noteworthy however that 81.6% of cases had no HbA1c test done in hospital, so they wouldn't know if the result was normal or abnormal
+```
+
+**Metformin VS Readmitted**
+```{r Metformin VS Readmitted}
+table(db.expl$metformin, db.expl$readmitted)
+met_readm.chisq <- chisq.test(table(db.expl$metformin, db.expl$readmitted))
+met_readm.chisq # The results are highly significant (p=0.002862), indicating that there is an association between the two variables
+percent_contrib(met_readm.chisq) # Steady and <30 has the highest percent contribution (45.2%) with Up and <30 (26.9%) following
+round(met_readm.chisq$residuals,2) # There are negative associations between Steady and <30 and Up and <30. This indicates that in the group of patients who are readmitted within 30 days, there are fewer cases than expected where they were on metformin with no change in dosage, and where their metformin dosages were increaseed.
+```
+
+**Glimepiride VS Readmitted**
+```{r Glimepiride VS Readmitted}
+table(db.expl$glimepiride, db.expl$readmitted)
+glim_readm.chisq <- chisq.test(table(db.expl$glimepiride, db.expl$readmitted))
+glim_readm.chisq # The findings are not statistically significant (p=0.235), indicating that we cannot reject the null hypothesis that the two variables are independent
+```
+
+**Glipizide VS Readmitted**
+```{r Glipizide VS Readmitted}
+table(db.expl$glipizide, db.expl$readmitted)
+glip_readm.chisq <- chisq.test(table(db.expl$glipizide, db.expl$readmitted))
+glip_readm.chisq # The results are highly significant (p=0.003262), indicating that there is an association between the two variables
+percent_contrib(glip_readm.chisq) # Down and <30 has the highest percent contribution (47.3%), with Up, <30 (19.0%) and Steady, <30 (18.3%) following
+round(glip_readm.chisq$residuals,2) # There are positive associations between each Down, Steady and Up with <30. This indicates there are more people than expected in the readmitted group who are on glipizide with or without a dosage change. It is noteworthy that glipizide, glimepiride and glyburide are all part of the sulfonylurea class of medications, which are associated with increased risk of cardiovascular death as well as episodes of severe hypoglycemia
+```
+
+**Glyburide VS Readmitted**
+```{r Glyburide VS Readmitted}
+table(db.expl$glyburide, db.expl$readmitted)
+gly_readm.chisq <- chisq.test(table(db.expl$glyburide, db.expl$readmitted))
+gly_readm.chisq # The results are not statistically significant (p=0.6068), indicating we fail to reject the null hypothesis that the variables are independent
+```
+
+**Pioglitazone VS Readmitted**
+```{r Pioglitazone VS Readmitted}
+table(db.expl$pioglitazone, db.expl$readmitted)
+pio_readm.chisq <- chisq.test(table(db.expl$pioglitazone, db.expl$readmitted))
+pio_readm.chisq # The results are not statistically significant (p=0.3622), indicating we fail to reject the null hypothesis that the variables are independent
+```
+
+**Rosiglitazone VS Readmitted**
+```{r Rosiglitazone VS Readmitted}
+table(db.expl$rosiglitazone, db.expl$readmitted)
+rosi_readm.chisq <- chisq.test(table(db.expl$rosiglitazone, db.expl$readmitted))
+rosi_readm.chisq # The results are not statistically significant (p=0.7032), indicating we fail to reject the null hypothesis that the variables are independent. Of note, pioglitazone and rosiglitazone come from the same class of medications (glitazones)
+```
+
+**Insulin VS Readmitted**
+```{r Insulin VS Readmitted}
+table(db.expl$insulin, db.expl$readmitted)
+insulin_readm.chisq <- chisq.test(table(db.expl$insulin, db.expl$readmitted))
+insulin_readm.chisq # The results are highly significant (p=5.876e-11), indicating that there is an association between the two variables
+percent_contrib(insulin_readm.chisq) # Down, <30 has the highest percent contribution (40.0%), with No, <30 (35.8%) following
+round(insulin_readm.chisq$residuals,2) # There is a positive association between Down and <30, and a negative association between No and <30. This indicates that patients who were readmitted had more cases than expected where they were taking insulin and the dosage was decreased, and fewer patients who were not on insulin than expected. Insulin is a medication requiring close daily monitoring of blood sugar levels. A reduction in dosage without proper follow-up and monitoring could lead to hyperglycemia and eventually hospitalization for complications (e.g., diabetic ketoacidosis)
+```
+
+**Change VS Readmitted**
+```{r Change VS Readmitted}
+table(db.expl$change, db.expl$readmitted)
+ch_readm.chisq <- chisq.test(table(db.expl$change, db.expl$readmitted))
+ch_readm.chisq # The results are highly significant (p=0.0001085), indicating that there is an association between the two variables
+percent_contrib(ch_readm.chisq) # Ch, <30 has the highest percent contribution (50.4%), with No, <30 (41.3%) following
+round(ch_readm.chisq$residuals,2) # There is a positive association between Ch and <30, and a negative association between No and <30. This indicates that in the <30 day readmitted group, there were significantly more people than expected who had a change in diabetic medications in hospital, and fewer than expected who did not have a change. One reason for this could be that there may not be adequate follow-up relating to changes in diabetic medications, leading to complications and re-hospitalization
+```
+
+**Diabetes Meds VS Readmitted**
+```{r Diabetes Meds VS Readmitted}
+table(db.expl$diabetesMed, db.expl$readmitted)
+dbm_readm.chisq <- chisq.test(table(db.expl$diabetesMed, db.expl$readmitted))
+dbm_readm.chisq # The results are highly significant (p=1.953e-13), indicating that there is an association between the two variables
+percent_contrib(dbm_readm.chisq) # No, <30 has the highest percent contribution (69.6%), with Yes, <30 (22.0%) following
+round(dbm_readm.chisq$residuals,2) # There is a negative association between No diabetes meds and <30, with a positive association between Yes diabetes meds and <30. This indicates that of the people who were readmitted, fewer than expected are not on diabetic medications, and more than expected are on diabetic medications. These results are expected, as a lack of diabetic medications for diabetes indicates the individual is earlier in the disease progression and therefore their condition is less severe. Diabetic medications, if not monitored appropriately, can lead to complications such as hypo- and hyperglycemia, sometimes requiring hospitalization
+```
+
+## Other Bivariate Analyses
+
+Due to the above finding that patients in the readmitted group were less likely to have an abnormal HbA1c result, I'd like to explore whether there is a connection between an abnormal HbA1c Result and there being a potentially resulting change in diabetic medication during stay.
+
+**A1c Result VS Change in Medication**
+```{r A1c Result VS Change in Medication}
+table(db.expl$A1Cresult, db.expl$change)
+A1C_change.chisq <- chisq.test(table(db.expl$A1Cresult, db.expl$change))
+A1C_change.chisq # The results are highly significant (p<2.2e-16), indicating that there is an association between the two variables
+percent_contrib(A1C_change.chisq) # >7 (abnormal HbA1c Result) and Change in medication has the highest percent contribution (47.8%), with >7 and No change in medication (39.2%) following
+round(A1C_change.chisq$residuals,2) # There are more patients than expected in the group of those with an abnormal HbA1c and a Change in medication, and fewer patients than expected in the group of those with an abnormal HbA1c and No change. This supports the idea that an abnormal HbA1c finding may contribute to a change in diabetic medication. However, more focused study would need to be completed to identify if this relationship may be causal
+```
+
+# Multivariate Analysis
+
+Given that we found there was a positive association between a reduction in insulin dosage and being readmitted within 30 days, I would like compare this to discharge disposition ID as well in the subset of patients who received a reduction in insulin dosage.
+
+**Reduction in Insulin VS Readmitted VS Discharge**
+```{r Reduction in Insulin VS Readmitted VS Discharge}
+insDown <- db.expl[db.expl$insulin == 'Down',] # Create subset
+table(insDown$discharge_disposition_id, insDown$readmitted)
+
+ggplot(insDown, aes(x=fct_infreq(discharge_disposition_id), fill = readmitted)) + geom_bar() + theme_bw() + labs(x = 'Discharge Disposition ID', y = 'Count', title = 'Discharge and Readmission Status for Patients with Insulin Reduction') + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+notinsDown <- db.expl[db.expl$insulin != 'Down',]
+ggplot(notinsDown, aes(x=fct_infreq(discharge_disposition_id), fill = readmitted)) + geom_bar() + theme_bw() + labs(x = 'Discharge Disposition ID', y = 'Count', title = 'Discharge and Readmission Status for Patients Without Insulin Reduction') + theme(axis.text.x = element_text(angle = 90, hjust = 1)) # Subset with insulin reduction appears to have slightly higher proportions of not readmitted in every category except for DcHome
+
+insDown_dcid_readm.chisq <- chisq.test(table(insDown$discharge_disposition_id, insDown$readmitted))
+insDown_dcid_readm.chisq # The chi-squared results are highly significant (p<2.2e-16) that there is an association between readmitted and discharge_disposition_id within the subset of patients who had a decrease in insulin dosage
+percent_contrib(insDown_dcid_readm.chisq) # DcOtherFacility, <30 has the highest percent contribution (63.1%) with DcHome (16.1%) following
+round(insDown_dcid_readm.chisq$residuals,2) # There is a positive association between DcOtherFacility and <30, and a negative association between DcHome and <30. This indicates that in the <30 group, more patients than expected were DcOtherFacility, and fewer than expected were discharged home. These findings are similar to the bivariate comparison of Discharge Disposition ID and Readmitted in the whole dataset, although in this subset, the DcOtherFacility, <30 group has a higher percent contribution (63.1% vs 48.8%), suggesting that with an insulin dosage reduction, patients may be even more likely to be discharged to another facility in the readmitted group
+```
+
+On another note, given that there were positive associations between medication change and readmission, and medication change and an abnormal A1C result, but a negative association between abnormal A1C and readmission, I would like to further explore whether within the group of people with a change in medication there is still a negative association between abnormal A1C and readmission.
+
+**Readmitted <30 VS A1C Result VS Change in Medication**
+```{r Readmitted <30 VS A1C Result VS Change in Medication}
+ch <- db.expl[db.expl$change == 'Ch',] # Create subset
+table(ch$A1Cresult, ch$readmitted)
+
+ggplot(ch, aes(x=fct_infreq(A1Cresult), fill = readmitted)) + geom_bar() + theme_bw() + labs(x = 'A1C Result', y = 'Count', title = 'A1C and Readmission Status for Patients Who Had a Med Change') + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+noch <- db.expl[db.expl$change != 'Ch',] 
+ggplot(noch, aes(fct_infreq(A1Cresult), fill = readmitted)) + geom_bar() + theme_bw() + labs(x = 'A1C Result', y = 'Count', title = 'A1C and Readmission Status for Patients with No Med Change') + theme(axis.text.x = element_text(angle = 90, hjust = 1)) # There appears to be a higher proportion of patients with an abnormal A1C (>7) who were not readmitted in the change in medication group
+
+A1C_readm_ch.chisq <- chisq.test(table(ch$A1Cresult, ch$readmitted))
+A1C_readm_ch.chisq # The chi-squared results are significant at the alpha=0.05 level (p=0.03509), indicating that there is an association between A1C result and readmitted within the change in medication group
+percent_contrib(A1C_readm_ch.chisq) # >7, <30 has the highest pecent contribution (54.3%)
+round(A1C_readm_ch.chisq$residuals,2) # There is still a negative association between >7 and <30, indicating that even within the group of patients who had a change in medication, there were fewer patients than expected who had an abnormal A1C result and were readmitted. However, the percent contribution is lower than that of >7, <30 for the greater sample (68.3%)
+```
+
+# Transform Data for Modeling
+
+In order to use the data for modeling, we will:
+
+* Scale the numeric attributes to be between 0 and 1 using min-max scaling
+* Integer encode any ordinal variables and then scale those also using min-max scaling
+* One-hot encode all categorical variables
+    
+These transformations will be put in a new dataframe object simply entitled "db".
+
+First we will define a function to complete the min-max scaling on numeric attributes.
+```{r Min-Max Scaling Function}
+minmax <- function(x) {
+  return((x-min(x))/(max(x)-min(x)))
+} # All resulting values will be between 0 and 1
+```
+
+**Numeric Attributes**
+```{r Numeric Attributes}
+db <- db.expl # Create new dataframe entitled "db" to house data transformed for modeling
+db[,1:8] <- lapply(db.expl[,1:8], minmax) # Apply min-max scaling to all numeric attributes and save them to the new dataframe
+```
+
+**Ordinal Attribute**
+```{r Ordinal Attribute}
+db$age <- minmax(as.numeric(db.expl$age)) # Convert Age to its ordered numeric IDs (1-10), and then scale the values
+```
+
+**Categorical Attributes**
+```{r Categorical Attributes}
+# First convert categorical variables with two categories (gender, change, diabetesMed, readmitted) to 0 and 1 so that they don't get converted into two variables each with the one-hot encoding
+db$gender <- as.numeric(db.expl$gender)
+db$gender[db$gender == 1] <- 0 # 0 will be female
+db$gender[db$gender == 2] <- 1 # 1 will be male
+db$change <- as.numeric(db.expl$change)
+db$change[db$change == 2] <- 0 # 1 will be change ('Ch'), 0 will be no change ('No')
+db$diabetesMed <- as.numeric(db.expl$diabetesMed)
+db$diabetesMed[db$diabetesMed == 1] <- 0 # 0 will be No
+db$diabetesMed[db$diabetesMed == 2] <- 1 # 1 will be Yes
+db$readmitted <- as.numeric(db.expl$readmitted)
+db$readmitted[db$readmitted == 2] <- 0 # Not<30 will be 0, while <30 will be 1
+
+# Now one-hot encode the remaining categorical variables (factor type)
+db <- one_hot(as.data.table(db)) # Replaced 19 categorical variables with 77 binary dummy variables
+```
+
+Now we may review the final structure of the dataset to be modeled, and export it.
+```{r Review final structure and Export}
+str(db) # There are now a total of 82 variables, all between 0 and 1
+#write.csv(db, '/Users/amyhowe/Desktop/Dataset_Modeling.csv', row.names = F) # Export dataset for modeling
+```
