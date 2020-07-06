@@ -32,7 +32,7 @@ library(data.table)
 
 First import the raw data, and save it to the object db.raw
 ```{r Import}
-db.raw <- read.csv('INSERT_FILE_PATH_HERE')
+db.raw <- read.csv('INSERT FILEPATH TO Dataset_Raw.csv HERE')
 ```
 
 Let's take a look at the structure of the dataset, and identify if there are any duplicated rows or "NA" values.
@@ -531,13 +531,30 @@ str(db.expl) # We now have a dataframe with 28 variables and 69973 records ready
 
 # Bivariate Analysis
 
-## Correlation of Numeric Attributes
+## Correlation of Numeric and Ordinal Attributes
 
-```{r Correlation for Numeric Attributes}
-rcorr(as.matrix(db.expl[,c(1:8)]), type = 'spearman') # No strong monotonic correlations. There are moderate correlations between number of medications and time in hospital (0.46), number of medications and number of procedures (0.37), and number of lab procedures and time in hospital (0.35). The rest are weak correlations. There is 0 correlation between time in hospital and number of emergency visits, but this is NOT statistically significant (p = 0.283). The same applies for number of procedures and number of lab procedures (p = 0.309). The rest of the findings are highly significant (p<0.01)
+Let's take a look at the correlations of numeric and ordinal attributes. Given that there will be one ordinal attribute (Age) to compare in the mix, as well as the fact that there are numerous outliers in the numeric data, we will be using Spearman's correlation which uses ranks.
+```{r Correlation for Numeric and Ordinal Attributes} 
+rcorr(as.matrix(cbind(db.expl[,c(1:8)], age = as.numeric(db.expl$age))), type = 'spearman') # No strong monotonic correlations. There are moderate correlations between number of medications and time in hospital (0.46), number of medications and number of procedures (0.37), and number of lab procedures and time in hospital (0.35). The rest are weak correlations. There is 0 correlation between time in hospital and number of emergency visits, but this is NOT statistically significant (p = 0.283). The same applies for number of procedures and number of lab procedures (p = 0.309). The rest of the findings are highly significant (p<0.01)
 
-corr <- round(cor(db.expl[,c(1:8)], method = 'spearman'), 2)
+corr <- round(cor(cbind(db.expl[,c(1:8)], age = as.numeric(db.expl$age)), method = 'spearman'), 2)
 ggcorrplot(corr, hc.order = TRUE, type = "lower", lab = TRUE) # Visualize the correlation heatmap
+```
+
+## Scatterplots for Numeric Variables
+
+Let's take a look at the scatterplots for each combination of numeric variables.
+```{r Scatterplot Matrix}
+pairs(db.expl[,1:8], pch = 20, col = rgb(red = 0, green = 0, blue = 0, alpha = 0.1))
+```
+
+Let's focus in on the scatterplots for the three combinations we found to have the highest Spearman's r correlation coefficient.
+```{r Scatterplots of Combinations with Highest Correlation}
+plot(jitter(db.expl$time_in_hospital,2), db.expl$num_medications, pch=20, col = rgb(red = 0, green = 0, blue = 0, alpha = 0.1), xlab = 'Time in Hospital', ylab = 'No. Medications') # Added transparency, as well as jitter along the x-axis to better see the trend. As the time in hospital increases, the number of medications appears to increase at a linear rate. However, there appears to be a lot of noise as well
+
+plot(jitter(db.expl$num_procedures,2), db.expl$num_medications, pch=20, col = rgb(red = 0, green = 0, blue = 0, alpha = 0.1), xlab = 'No. Procedures', ylab = 'No. Medications') # Jitter added along the x-axis as well. It appears as if as the number of procedures increase, the number of medications increase as well at a linear rate. However, there is more noise as the number of procedures increases as well
+
+plot(jitter(db.expl$time_in_hospital,2), db.expl$num_lab_procedures, pch=20, col = rgb(red = 0, green = 0, blue = 0, alpha = 0.1), xlab = 'Time in Hospital', ylab = 'No. Lab Procedures') # Jitter present for x-axis here too. As the time in hospital increases, the number of lab procedures increase. However, the relationship may be modeled better with a curve than with a line.
 ```
 
 ## Variables by Readmission Status
@@ -579,7 +596,7 @@ group_by(db.expl, readmitted) %>%
 boxplot(num_procedures~readmitted, data=db.expl, horizontal = T, col = '#83afe6', xlab = "Number of Procedures", ylab = "Readmission Status") # Distributions look identical
 
 var.test(num_procedures ~ readmitted, data = db.expl) # Fail to reject the null hypothesis that the variances are equal (p=0.07307)
-t.test(num_procedures~readmitted, data=db.expl, var.equal = TRUE) # Fail to reject the null hypothesis that the means are the same (p=0.9695)
+t.test(db.expl$num_procedures[db.expl$readmitted == "<30"], db.expl$num_procedures[db.expl$readmitted == "Not<30"], alternative = 'less' , var.equal = TRUE) # Fail to reject the null hypothesis that the means are the same (p=0.4847)
 ```
 
 **Number of Medications VS Readmitted**
@@ -644,6 +661,8 @@ For the one remaining ordinal variable, age, the frequencies and histograms of e
 **Age VS Readmitted**
 ```{r Age VS Readmitted}
 table(db.expl$age, db.expl$readmitted) # Values appear to peak similarly in the 70-80 range
+group_by(db.expl, readmitted) %>%
+  summarise(count = n(), median = median(as.numeric(age))) # The median of the <30 group is 8 ([70-80)), while the median of the Not <30 group is 7 ([60-70)) 
 
 ggplot(subset(db.expl, db.expl$readmitted == "<30"), aes(age)) + geom_bar(color = 'black', fill = '#83afe6') + theme_bw() + labs(x = 'Age in Readmitted Group', y = 'Count')
 ggplot(subset(db.expl, db.expl$readmitted == "Not<30"), aes(age)) + geom_bar(color = 'black', fill = '#83afe6') + theme_bw() + labs(x = 'Age in Not Readmitted Group', y = 'Count') # The distribution of the readmitted in <30 days group appears to have a bit more weight to the right than the other group
@@ -731,7 +750,7 @@ percent_contrib(d3_readm.chisq) # 460-519 (Diseases Of The Respiratory System) w
 round(d3_readm.chisq$residuals,2) # There are more patients than expected in those who are readmitted with a tertiary diagnosis of Diseases Of The Respiratory System, and fewer than expected with Endocrine, Nutritional And Metabolic Diseases, And Immunity Disorders
 ```
 
-**Result VS Readmitted**
+**A1C Result VS Readmitted**
 ```{r A1c Result VS Readmitted}
 table(db.expl$A1Cresult, db.expl$readmitted)
 A1C_readm.chisq <- chisq.test(table(db.expl$A1Cresult, db.expl$readmitted))
@@ -746,7 +765,7 @@ table(db.expl$metformin, db.expl$readmitted)
 met_readm.chisq <- chisq.test(table(db.expl$metformin, db.expl$readmitted))
 met_readm.chisq # The results are highly significant (p=0.002862), indicating that there is an association between the two variables
 percent_contrib(met_readm.chisq) # Steady and <30 has the highest percent contribution (45.2%) with Up and <30 (26.9%) following
-round(met_readm.chisq$residuals,2) # There are negative associations between Steady and <30 and Up and <30. This indicates that in the group of patients who are readmitted within 30 days, there are fewer cases than expected where they were on metformin with no change in dosage, and where their metformin dosages were increaseed.
+round(met_readm.chisq$residuals,2) # There are negative associations between Steady and <30 and Up and <30. This indicates that in the group of patients who are readmitted within 30 days, there are fewer cases than expected where they were on metformin with no change in dosage, and where their metformin dosages were increased.
 ```
 
 **Glimepiride VS Readmitted**

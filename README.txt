@@ -1,4 +1,4 @@
-Using deep neural networks to predict 30-day hospital readmission in diabetic patients
+Using deep feedforward neural networks to predict 30-day hospital readmission in diabetic patients
 
 Introduction to the Project:
 
@@ -28,6 +28,9 @@ Dataset_Modeling.csv
 
 id_mapping.csv
 - Document that originally came with the raw dataset containing the names of each level for three variables: Admission Source ID, Discharge Disposition ID, and Admission Type ID.
+
+Project Report - Lit Review, Data Description and Approach.pdf
+- Report on Project findings; currently includes the Introduction, Literature Review, Data Description and Exploration as well as the Approach.
 
 Results for Cleaning and Exploratory Analysis.html
 - html document knitted from Coding for Cleaning and Exploratory Analysis.Rmd to show the results of the code
