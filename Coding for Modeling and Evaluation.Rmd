@@ -1,0 +1,2995 @@
+---
+title: "CKME136 Capstone - Modeling and Evaluation of Diabetes Readmission Data"
+author: "Amy Howe"
+output: html_document
+---
+
+# Packages and Installation of TensorFlow
+
+Install and load required packages.
+```{r Install and Load Packages if Required, message=FALSE}
+if(!require('tensorflow')){install.packages('tensorflow')} # Package connects to TensorFlow
+library(tensorflow)
+#install_tensorflow() # Install TensorFlow if not already previously installed; requires a working installation of anaconda; you will be prompted in the console to download a version of anaconda prior if not already installed. Additionally, coding syntax requires TensorFlow version 2 and above.
+if(!require('keras')){install.packages('keras')} # Use keras for neural network creation; interfaces to the Python Keras API which can run over TensorFlow
+library(keras)
+if(!require('caret')){install.packages('caret')} # Use to create folds for cross validation and obtain confusion matrix
+library(caret)
+if(!require('e1071')){install.packages('e1071')} # Apparently also required for confusion matrix and related measures (precision, recall, F1)
+library(e1071)
+if(!require('ROSE')){install.packages('ROSE')} # For oversampling
+library(ROSE)
+if(!require('pROC')){install.packages('pROC')} # For ROC/AUC
+library(pROC)
+if(!require('class')){install.packages('class')} # For knn function
+library(class)
+if(!require('randomForest')){install.packages('randomForest')} # For randomForest function
+library(randomForest)
+if(!require('ggplot2')){install.packages('ggplot2')} # For visualizations
+library(ggplot2)
+```
+
+
+# Load Data
+
+First we will load the dataset that is ready for modeling.
+```{r Import Data}
+db.model <- read.csv('INSERT FILEPATH TO Dataset_Modeling.csv HERE')
+```
+
+
+# Create Folds
+
+Next we will create 10 stratified folds. I.e., each of the 10 folds will have a similar proportion of the class attribute (readmitted) so that they are representative of the dataset overall: around 9% readmitted and 91% not readmitted.
+```{r Create Stratified Folds}
+set.seed(42) # Make results reproducible
+folds <- createFolds(y = db.model$readmitted, k = 10, list = FALSE) # Stratified sampling to use for cross-validation
+db.folds <- db.model
+db.folds$folds <- folds # Create dataframe with the fold numbers as a column so they may be used together going forward
+for (f in 1:10){
+  print(prop.table(table(db.folds$readmitted[folds == f])))
+} # All folds are close to 91% for not readmitted (0), and 9% for readmitted (1), which is close to the proportions in the overall dataset
+```
+
+# Oversample to Balance Target Attribute
+
+Next we will randomly oversample the minority class in the target attribute. We want the classes to be approximately equal in each fold so that we may avoid model bias that favours the majority class. Oversampling was chosen over undersampling so that no information may be lost.
+```{r Oversample By Fold}
+db.over <- db.folds
+for (f in 1:10) {
+x <- ovun.sample(readmitted~., data = db.over[db.over$folds == f,], method = 'over', seed = 38)
+y <- db.over[!(db.over$folds == f),]
+db.over <- rbind(y, x$data)
+} # For each fold, randomly oversample the minority class so that the target attribute (readmitted) may be balanced prior to modeling, and save the rows back into the dataframe db.over
+
+table(db.over$folds, db.over$readmitted) # Each fold now has approximately equal numbers of cases in each category of the readmitted attribute so that we may avoid model bias towards the majority class
+dim(db.over) # We now have 127592 cases overall, which is close to what is expected. The folds column represents the 83rd variable
+```
+
+Now we will convert the dataframe into a matrix, so that it may be used as an input to the neural network algorithms.
+```{r Convert to Matrix}
+db <- as.matrix(db.over)
+```
+
+# Neural Network Model Creation and Evaluation
+
+For each model parameter, we will try creating a neural network with just one train/test split to get a sense of any issues (as it is less computationally intensive than 10-fold cross validation). These will be noted as "test models" ('tmodel' for the object), as the configuration will be tested before moving to 10-fold cross valdidation to confirm the optimal parameter.
+
+First we will set a seed that applies to all TensorFlow operations so that results are reproducible.
+```{r Set seed}
+tensorflow::tf$random$set_seed(31) # If you receive an error indicating that the installation of TensorFlow is not found even though it was installed, just re-run this chunk and it should work
+```
+
+This first test neural network model will have 2 hidden layers with 81 neurons each (same as input) with Relu activation functions; the output layer will be one neuron with the sigmoid function so that answers will be expressed between 0 and 1. We'll start with 20 epochs to be mindful of computation. We will start with the Binary Cross-Entropy loss function and the Adam optimizer with their default settings. The training batch size will be left at its default: 32. We will add the test set in as 'validation data' so that we can plot its accuracy and loss alongside the training set by epoch to help identify overfitting and other issues.
+```{r Baseline Test Neural Network Code; 81/81, message=FALSE}
+# Create a sequential model (composed of linear layers)
+tmodel1 <- keras_model_sequential()
+
+# Create layers
+tmodel1 %>%
+  layer_dense(units = 81, activation = 'relu', input_shape = c(81)) %>% # First hidden layer with definition of the input layer embedded
+  layer_dense(units = 81, activation = 'relu') %>% # Second hidden layer
+  layer_dense(units = 1, activation = 'sigmoid') # Output layer
+
+# Compile the model
+tmodel1 %>% compile(
+  loss = 'binary_crossentropy', # Loss function
+  optimizer = 'adam', # Optimizer
+  metrics = 'accuracy'
+ )
+
+# Fit model to data
+training <- tmodel1 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20, # Number of epochs (i.e., number of times the training goes through the whole training dataset)
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]), # The test set will be added in here as the 'validation data' so that we may see its accuracy and loss after each epoch. This will be excluded when running 10-fold cross validation
+  verbose = 0 # We don't need to see the loading bars
+ )
+
+# Plot the training
+plot(training) # The training loss is gradually decreasing with the accuracy increasing. However, the validation (test) loss is increasing with its accuracy continually decreasing. This indicates that the model is overfitting on the training data. The model is likely just memorizing the training data, particularly since each hidden layer has the same number of inputs as the input layer. This obviously does not support accurate prediction on the validation set
+
+# Predict classes for test data
+tmod1class <- tmodel1 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation measures
+tmod1result <- confusionMatrix(as.factor(tmod1class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod1result # Accuracy on the test set is 0.5391, which is very low in comparison to the 0.8820 accuracy of the training set. Also, Recall is very low at 0.2825
+tmod1roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod1class))
+auc(tmod1roc) # AUC = 0.5395, which is not much better than randomly guessing the class attribute (AUC - 0.50)
+```
+
+Even though the first model did not perform optimally, let's try the same model parameters using 10-fold cross validation to ensure the code works and view the evaluation measures.
+```{r Baseline 10-fold Neural Network Code: 81/81, message=FALSE}
+# Create empty dataframe to house evaluation measures
+accuracy <- rep(0, times = 10)
+precision <- rep(0, times = 10)
+recall <- rep(0, times = 10)
+f1 <- rep(0, times = 10)
+auc <- rep(0, times = 10)
+eval1 <- as.data.frame(cbind(accuracy, precision, recall, f1, auc))
+
+# Train model per fold
+for (f in 1:10){
+
+  # Initiate
+  model1 <- keras_model_sequential()
+  
+  # Layers
+  model1 %>%
+    layer_dense(units = 81, activation = 'relu', input_shape = c(81)) %>%
+    layer_dense(units = 81, activation = 'relu') %>%
+    layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+  model1 %>% compile(
+    loss = 'binary_crossentropy',
+    optimizer = 'adam',
+    metrics = 'accuracy'
+  )
+
+  # Train
+  model1 %>% fit(
+    db[db[,83] != f, 1:81], 
+    db[db[,83] != f, 82], 
+    epochs = 20, 
+    verbose = 0
+  )
+
+  # Predict classes for test data
+  mod1class <- model1 %>% predict_classes(db[db[,83] == f, 1:81], batch_size = 128)
+
+  # Evaluation
+  mod1result <- confusionMatrix(as.factor(mod1class), as.factor(db[db[,83] == f, 82]), mode="prec_recall", positive = "1")
+  eval1$accuracy[f] <- mod1result$overall['Accuracy']
+  eval1$precision[f] <- mod1result$byClass['Precision']
+  eval1$recall[f] <- mod1result$byClass['Recall']
+  eval1$f1[f] <- mod1result$byClass['F1']
+  mod1roc <- roc(as.numeric(db[db[,83] == f, 82]), as.numeric(mod1class))
+  eval1$auc[f] <- auc(mod1roc)
+}
+
+eval1 # Dataframe of each evaluation metric (accuracy, precision, recall, f1, AUC) for each fold (1-10)
+summary(eval1) # The mean of each evaluation metric is: Accuracy: 0.5348, Precision: 0.5764, Recall: 0.2700, f1: 0.3675, AUC: 0.5352. This is similar to what we found on the test model.
+```
+
+Now that we have a baseline to improve, and we know the code is working, we can try to improve the model. First, we're going to try to improve the structure of the model: the number of hidden layers and the number of neurons per hidden layer.
+
+
+## Structure with One Hidden Layer
+
+Let's try a number of neurons in the hidden layer using a commonly used rule: the number of neurons should be equal to the square root of the input layer, plus one of 1-10. The square root of 81 is 9. We will try 16 (9 + 7) to see if this may be a viable structure. Then we'll try a few other values as well.
+
+**Test Model 2: 1 Hidden Layer with 16 Neurons**
+```{r Test Model 2: 16, message=FALSE}
+# Create model
+tmodel2 <- keras_model_sequential()
+
+# Create layers
+tmodel2 %>%
+  layer_dense(units = 16, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel2 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training2 <- tmodel2 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training2) # Training accuracy is closer to test accuracy this time
+
+# Predict classes for test data
+tmod2class <- tmodel2 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod2result <- confusionMatrix(as.factor(tmod2class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod2result # Test set Accuracy is 0.6053; Precision is 0.6074, Recall is much improved, at 0.5997, with F1 = 0.6035
+tmod2roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod2class))
+auc(tmod2roc) # AUC = 0.6054
+```
+
+**Test Model 3: 1 Hidden Layer with 32 Neurons**
+```{r Test Model 3: 32, message=FALSE}
+# Create model
+tmodel3 <- keras_model_sequential()
+
+# Create layers
+tmodel3 %>%
+  layer_dense(units = 32, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel3 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training3 <- tmodel3 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training3) 
+
+# Predict classes for test data
+tmod3class <- tmodel3 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod3result <- confusionMatrix(as.factor(tmod3class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod3result # Test set accuracy is 0.569 - less than the last one. Recall is worse than the last one (0.4983), reducing the F1 score as well
+tmod3roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod3class))
+auc(tmod3roc) # AUC = 0.5691
+```
+
+Let's also try with the number of neurons in the hidden layer being about half the number from the input layer.
+
+**Test Model 4: 1 Hidden Layer with 41 Neurons**
+```{r Test Model 4: 41, message=FALSE}
+# Create model
+tmodel4 <- keras_model_sequential()
+
+# Create layers
+tmodel4 %>%
+  layer_dense(units = 41, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel4 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training4 <- tmodel4 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training4) # Similar performance to last attempt
+
+# Predict classes for test data
+tmod4class <- tmodel4 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod4result <- confusionMatrix(as.factor(tmod4class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod4result # Test set accuracy is 0.5709, with recall at 0.5027
+tmod4roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod4class))
+auc(tmod4roc) # AUC = 0.5711
+```
+
+**Test Model 5: 1 Hidden Layer with 64 Neurons**
+```{r Test Model 5: 64, message=FALSE}
+# Create model
+tmodel5 <- keras_model_sequential()
+
+# Create layers
+tmodel5 %>%
+  layer_dense(units = 64, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel5 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training5 <- tmodel5 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training5) 
+
+# Predict classes for test data
+tmod5class <- tmodel5 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod5result <- confusionMatrix(as.factor(tmod5class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod5result # Test set accuracy is 0.5576. Recall is much lower at 0.4316
+tmod5roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod5class))
+auc(tmod5roc) # AUC = 0.5578
+```
+
+**Test Model 6: 1 Hidden Layer with 128 Neurons**
+```{r Test Model 6: 128, message=FALSE}
+# Create model
+tmodel6 <- keras_model_sequential()
+
+# Create layers
+tmodel6 %>%
+  layer_dense(units = 128, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel6 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training6 <- tmodel6 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training6) # The training set has an artificially high accuracy here too, around 0.8 - similar to the 81/81 test model
+
+# Predict classes for test data
+tmod6class <- tmodel6 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod6result <- confusionMatrix(as.factor(tmod6class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod6result # Test set accuracy is 0.5448. Recall low at 0.3712
+tmod6roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod6class))
+auc(tmod6roc) # AUC = 0.5451
+```
+
+So far, with 1 hidden layer, the best performing model on accuracy and AUC is Test Model 2 with 16 neurons. We'll retrain the model using 10-fold cross validation to obtain the average evaluation metrics to compare to configurations with other numbers of hidden layers.
+
+**Cross Validation for Model 2: 1 Hidden Layer with 16 Neurons**
+```{r Model 2 with Cross Validation: 16, message=FALSE}
+# Create empty dataframe to house evaluation measures
+accuracy <- rep(0, times = 10)
+precision <- rep(0, times = 10)
+recall <- rep(0, times = 10)
+f1 <- rep(0, times = 10)
+auc <- rep(0, times = 10)
+eval2 <- as.data.frame(cbind(accuracy, precision, recall, f1, auc))
+
+# Train model per fold
+for (f in 1:10){
+
+  # Initiate
+  model2 <- keras_model_sequential()
+  
+  # Layers
+  model2 %>%
+    layer_dense(units = 16, activation = 'relu', input_shape = c(81)) %>%
+    layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+  model2 %>% compile(
+    loss = 'binary_crossentropy',
+    optimizer = 'adam',
+    metrics = 'accuracy'
+  )
+
+  # Train
+  model2 %>% fit(
+    db[db[,83] != f, 1:81], 
+    db[db[,83] != f, 82], 
+    epochs = 20, 
+    verbose = 0
+  )
+
+  # Predict classes for test data
+  mod2class <- model2 %>% predict_classes(db[db[,83] == f, 1:81], batch_size = 128)
+
+  # Evaluation
+  mod2result <- confusionMatrix(as.factor(mod2class), as.factor(db[db[,83] == f, 82]), mode="prec_recall", positive = "1")
+  eval2$accuracy[f] <- mod2result$overall['Accuracy']
+  eval2$precision[f] <- mod2result$byClass['Precision']
+  eval2$recall[f] <- mod2result$byClass['Recall']
+  eval2$f1[f] <- mod2result$byClass['F1']
+  mod2roc <- roc(as.numeric(db[db[,83] == f, 82]), as.numeric(mod2class))
+  eval2$auc[f] <- auc(mod2roc)
+}
+
+eval2
+summary(eval2) # The mean of each evaluation metric is: Accuracy: 0.5799, Precision: 0.5958, Recall: 0.5026, f1: 0.5435, AUC: 0.5800. This is an improvement from our original baseline cross validation on the 81/81 network
+```
+
+Let's try some structures with 2 hidden layers.
+
+## Structure with 2 Hidden Layers
+
+We'll try some structures with 2 hidden layers with an equal number of neurons using the numbers we tried for testing with 1 hidden layer. We will also test a few structures with a larger and then smaller number of neurons for the 2 hidden layers. Of note, for any network with more than one hidden layer, I will express the number of neurons per hidden layer as x/y/..., with x being the number of neurons in the first hidden layer, y being the number of neurons in the second hidden layer, and so on.
+
+**Test Model 7: 2 Hidden Layers; 16/16**
+```{r Test Model 7: 16/16, message=FALSE}
+# Create model
+tmodel7 <- keras_model_sequential()
+
+# Create layers
+tmodel7 %>%
+  layer_dense(units = 16, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu') %>% 
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel7 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training7 <- tmodel7 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training7) # Still overfitting with validation loss and accuracy going in the opposite directions from what we want
+
+# Predict classes for test data
+tmod7class <- tmodel7 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod7result <- confusionMatrix(as.factor(tmod7class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod7result # Test set accuracy is 0.5566. Recall at 0.5114 
+tmod7roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod7class))
+auc(tmod7roc) # AUC = 0.5567
+```
+
+**Test Model 8: 2 Hidden Layers; 32/32**
+```{r Test Model 8: 32/32, message=FALSE}
+# Create model
+tmodel8 <- keras_model_sequential()
+
+# Create layers
+tmodel8 %>%
+  layer_dense(units = 32, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 32, activation = 'relu') %>% 
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel8 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training8 <- tmodel8 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training8)
+
+# Predict classes for test data
+tmod8class <- tmodel8 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod8result <- confusionMatrix(as.factor(tmod8class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod8result # Test set accuracy is 0.5597. Recall much lower at 0.4182
+tmod8roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod8class))
+auc(tmod8roc) # AUC = 0.56
+```
+
+**Test Model 9: 2 Hidden Layers; 41/41**
+```{r Test Model 9: 41/41, message=FALSE}
+# Create model
+tmodel9 <- keras_model_sequential()
+
+# Create layers
+tmodel9 %>%
+  layer_dense(units = 41, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 41, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel9 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training9 <- tmodel9 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training9)
+
+# Predict classes for test data
+tmod9class <- tmodel9 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod9result <- confusionMatrix(as.factor(tmod9class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod9result # Test set accuracy is 0.553. Recall very low at 0.3869
+tmod9roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod9class))
+auc(tmod9roc) # AUC = 0.5556
+```
+
+**Test Model 10: 2 Hidden Layers; 64/64**
+```{r Test Model 10: 64/64, message=FALSE}
+# Create model
+tmodel10 <- keras_model_sequential()
+
+# Create layers
+tmodel10 %>%
+  layer_dense(units = 64, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 64, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel10 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training10 <- tmodel10 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training10) # Training set has high accuracy (++ overfitting)
+
+# Predict classes for test data
+tmod10class <- tmodel10 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod10result <- confusionMatrix(as.factor(tmod10class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod10result # Test set accuracy is 0.5381. Recall very low at 0.3263
+tmod10roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod10class))
+auc(tmod10roc) # AUC = 0.5385
+```
+
+**Test Model 11: 2 Hidden Layers; 128/128**
+```{r Test Model 11: 128/128, message=FALSE}
+# Create model
+tmodel11 <- keras_model_sequential()
+
+# Create layers
+tmodel11 %>%
+  layer_dense(units = 128, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 128, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel11 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training11 <- tmodel11 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training11)
+
+# Predict classes for test data
+tmod11class <- tmodel11 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod11result <- confusionMatrix(as.factor(tmod11class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod11result # Test set accuracy is 0.5261. Recall extremely low at 0.1600
+tmod11roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod11class))
+auc(tmod11roc) # 0.5267
+```
+
+**Test Model 12: 2 Hidden Layers; 32/16**
+```{r Test Model 12: 32/16, message=FALSE}
+# Create model
+tmodel12 <- keras_model_sequential()
+
+# Create layers
+tmodel12 %>%
+  layer_dense(units = 32, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel12 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training12 <- tmodel12 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training12)
+
+# Predict classes for test data
+tmod12class <- tmodel12 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod12result <- confusionMatrix(as.factor(tmod12class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod12result # Test set accuracy is 0.5578, with recall at 0.4449
+tmod12roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod12class))
+auc(tmod12roc) # AUC = 0.558
+```
+
+**Test Model 13: 2 Hidden Layers; 64/32**
+```{r Test Model 13: 64/32, message=FALSE}
+# Create model
+tmodel13 <- keras_model_sequential()
+
+# Create layers
+tmodel13 %>%
+  layer_dense(units = 64, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 32, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel13 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training13 <- tmodel13 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training13)
+
+# Predict classes for test data
+tmod13class <- tmodel13 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod13result <- confusionMatrix(as.factor(tmod13class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod13result # Test set accuracy is 0.5548 with low recall at 0.3479
+tmod13roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod13class))
+auc(tmod13roc) # AUC = 0.5551
+```
+
+**Test Model 14: 2 Hidden Layers; 128/64**
+```{r Test Model 14: 128/64, message=FALSE}
+# Create model
+tmodel14 <- keras_model_sequential()
+
+# Create layers
+tmodel14 %>%
+  layer_dense(units = 128, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 64, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel14 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training14 <- tmodel14 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training14)
+
+# Predict classes for test data
+tmod14class <- tmodel14 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod14result <- confusionMatrix(as.factor(tmod14class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod14result # Test set accuracy is 0.5301; recall = 0.2071 (very low)
+tmod14roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod14class))
+auc(tmod14roc) # AUC = 0.5307
+```
+
+Of the structures with 2 hidden layers, the one with the 32/16 configuration (Test Model 12) performed the best in accuracy (0.5578) and AUC (0.558), narrowly beating out Test Model 7 (16/16), which had an accuracy of 0.5566 and an AUC of 0.5567. However, Test Model 7 had a much higher recall than Test Model 12 (0.5114 vs 0.4449). Given that we want to prioritize recall (i.e., we want the model to identify a high rate of the actual positives) we'll retrain Test Model 7 using 10-fold cross validation to obtain the average evaluation metrics to compare to configurations with other numbers of hidden layers.
+
+**Cross Validation for Model 7: 2 Hidden Layers; 16/16**
+```{r Model 7 with Cross Validation: 16/16, message=FALSE}
+# Create empty dataframe to house evaluation measures
+accuracy <- rep(0, times = 10)
+precision <- rep(0, times = 10)
+recall <- rep(0, times = 10)
+f1 <- rep(0, times = 10)
+auc <- rep(0, times = 10)
+eval7 <- as.data.frame(cbind(accuracy, precision, recall, f1, auc))
+
+# Train model per fold
+for (f in 1:10){
+
+  # Initiate
+  model7 <- keras_model_sequential()
+  
+  # Layers
+  model7 %>%
+    layer_dense(units = 16, activation = 'relu', input_shape = c(81)) %>%
+    layer_dense(units = 16, activation = 'relu') %>%
+    layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+  model7 %>% compile(
+    loss = 'binary_crossentropy',
+    optimizer = 'adam',
+    metrics = 'accuracy'
+  )
+
+  # Train
+  model7 %>% fit(
+    db[db[,83] != f, 1:81], 
+    db[db[,83] != f, 82], 
+    epochs = 20, 
+    verbose = 0
+  )
+
+  # Predict classes for test data
+  mod7class <- model7 %>% predict_classes(db[db[,83] == f, 1:81], batch_size = 128)
+
+  # Evaluation
+  mod7result <- confusionMatrix(as.factor(mod7class), as.factor(db[db[,83] == f, 82]), mode="prec_recall", positive = "1")
+  eval7$accuracy[f] <- mod7result$overall['Accuracy']
+  eval7$precision[f] <- mod7result$byClass['Precision']
+  eval7$recall[f] <- mod7result$byClass['Recall']
+  eval7$f1[f] <- mod7result$byClass['F1']
+  mod7roc <- roc(as.numeric(db[db[,83] == f, 82]), as.numeric(mod7class))
+  eval7$auc[f] <- auc(mod7roc)
+}
+
+eval7
+summary(eval7) # The mean of each evaluation metric is: Accuracy: 0.5745, Precision: 0.5821, Recall: 0.5359, f1: 0.5574, AUC: 0.5746
+```
+
+Let's try some structures with 3 hidden layers.
+
+## Structure with 3 Hidden Layers
+
+Now we will try a few configurations with 3 hidden layers. We'll use the same numbers as the previous layer, with the same number of neurons per each layer. Then, we will try having a lower number, then higher number, then lower number.
+
+**Test Model 15: 3 Hidden Layers; 16/16/16**
+```{r Test Model 15: 16/16/16, message=FALSE}
+# Create model
+tmodel15 <- keras_model_sequential()
+
+# Create layers
+tmodel15 %>%
+  layer_dense(units = 16, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel15 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training15 <- tmodel15 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training15) # Not overfitting as much as some of the previous iterations
+
+# Predict classes for test data
+tmod15class <- tmodel15 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod15result <- confusionMatrix(as.factor(tmod15class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod15result # Test set accuracy is 0.5724. Recall stayed at a reasonable value: 0.5383
+tmod15roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod15class))
+auc(tmod15roc) # AUC = 0.5725
+```
+
+
+**Test Model 16: 3 Hidden Layers; 32/32/32**
+```{r Test Model 16: 32/32/32, message=FALSE}
+# Create model
+tmodel16 <- keras_model_sequential()
+
+# Create layers
+tmodel16 %>%
+  layer_dense(units = 32, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 32, activation = 'relu') %>%
+  layer_dense(units = 32, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel16 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training16 <- tmodel16 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training16)
+
+# Predict classes for test data
+tmod16class <- tmodel16 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod16result <- confusionMatrix(as.factor(tmod16class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod16result # Test set accuracy is 0.5795; recall is a bit lower at 0.4745
+tmod16roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod16class))
+auc(tmod16roc) # AUC = 0.5797
+```
+
+**Test Model 17: 3 Hidden Layers; 41/41/41**
+```{r Test Model 17: 41/41/41, message=FALSE}
+# Create model
+tmodel17 <- keras_model_sequential()
+
+# Create layers
+tmodel17 %>%
+  layer_dense(units = 41, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 41, activation = 'relu') %>%
+  layer_dense(units = 41, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel17 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training17 <- tmodel17 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training17)
+
+# Predict classes for test data
+tmod17class <- tmodel17 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod17result <- confusionMatrix(as.factor(tmod17class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod17result # Test set accuracy is 0.5488. Recall low at 0.3598
+tmod17roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod17class))
+auc(tmod17roc) # AUC = 0.5491
+```
+
+**Test Model 18: 3 Hidden Layers; 64/64/64**
+```{r Test Model 18: 64/64/64, message=FALSE}
+# Create model
+tmodel18 <- keras_model_sequential()
+
+# Create layers
+tmodel18 %>%
+  layer_dense(units = 64, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 64, activation = 'relu') %>%
+  layer_dense(units = 64, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel18 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training18 <- tmodel18 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training18)
+
+# Predict classes for test data
+tmod18class <- tmodel18 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod18result <- confusionMatrix(as.factor(tmod18class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod18result # Test set accuracy is 0.5427. Recall very low at 0.2692
+tmod18roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod18class))
+auc(tmod18roc) # AUC = 0.5431
+```
+
+**Test Model 19: 3 Hidden Layers; 128/128/128**
+```{r Test Model 19: 128/128/128, message=FALSE}
+# Create model
+tmodel19 <- keras_model_sequential()
+
+# Create layers
+tmodel19 %>%
+  layer_dense(units = 128, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 128, activation = 'relu') %>%
+  layer_dense(units = 128, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel19 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training19 <- tmodel19 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training19)
+
+# Predict classes for test data
+tmod19class <- tmodel19 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod19result <- confusionMatrix(as.factor(tmod19class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod19result # Test set accuracy is 0.5243. Recall extremely low at 0.1554
+tmod19roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod19class))
+auc(tmod19roc) # AUC = 0.5249
+```
+
+**Test Model 20: 3 Hidden Layers; 16/32/16**
+```{r Test Model 20: 16/32/16, message=FALSE}
+# Create model
+tmodel20 <- keras_model_sequential()
+
+# Create layers
+tmodel20 %>%
+  layer_dense(units = 16, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 32, activation = 'relu') %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel20 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training20 <- tmodel20 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training20)
+
+# Predict classes for test data
+tmod20class <- tmodel20 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod20result <- confusionMatrix(as.factor(tmod20class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod20result # Test set accuracy is 0.5764; Recall higher at 0.5753
+tmod20roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod20class))
+auc(tmod20roc) # AUC = 0.5754
+```
+
+**Test Model 21: 3 Hidden Layers; 32/64/32**
+```{r Test Model 21: 32/64/32, message=FALSE}
+# Create model
+tmodel21 <- keras_model_sequential()
+
+# Create layers
+tmodel21 %>%
+  layer_dense(units = 32, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 64, activation = 'relu') %>%
+  layer_dense(units = 32, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel21 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training21 <- tmodel21 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training21)
+
+# Predict classes for test data
+tmod21class <- tmodel21 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod21result <- confusionMatrix(as.factor(tmod21class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod21result # Test set accuracy is 0.54. Recall low at 0.3151
+tmod21roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod21class))
+auc(tmod21roc) # AUC = 0.5404
+```
+
+**Test Model 22: 3 Hidden Layers; 64/128/64**
+```{r Test Model 22: 64/128/64, message=FALSE}
+# Create model
+tmodel22 <- keras_model_sequential()
+
+# Create layers
+tmodel22 %>%
+  layer_dense(units = 64, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 128, activation = 'relu') %>%
+  layer_dense(units = 64, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel22 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training22 <- tmodel22 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  verbose = 0
+ )
+
+# Plot training
+plot(training22)
+
+# Predict classes for test data
+tmod22class <- tmodel22 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod22result <- confusionMatrix(as.factor(tmod22class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod22result # Test set accuracy is 0.531. Recall low at 0.2004
+tmod22roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod22class))
+auc(tmod22roc) # AUC = 0.5315
+```
+
+Of the structures with 3 hidden layers, the one with the 16/32/16 configuration (Test Model 20) performed the best in accuracy, AUC, and recall. I will test this model using 10-fold cross validation to compare to the other configurations.
+
+**Cross Validation for Model 20: 3 Hidden Layers; 16/32/16**
+```{r Model 20 with Cross Validation: 16/32/16, message=FALSE}
+# Create empty dataframe to house evaluation measures
+accuracy <- rep(0, times = 10)
+precision <- rep(0, times = 10)
+recall <- rep(0, times = 10)
+f1 <- rep(0, times = 10)
+auc <- rep(0, times = 10)
+eval20 <- as.data.frame(cbind(accuracy, precision, recall, f1, auc))
+
+# Train model per fold
+for (f in 1:10){
+
+  # Initiate
+  model20 <- keras_model_sequential()
+  
+  # Layers
+  model20 %>%
+    layer_dense(units = 16, activation = 'relu', input_shape = c(81)) %>%
+    layer_dense(units = 32, activation = 'relu') %>%
+    layer_dense(units = 16, activation = 'relu') %>%
+    layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+  model20 %>% compile(
+    loss = 'binary_crossentropy',
+    optimizer = 'adam',
+    metrics = 'accuracy'
+  )
+
+  # Train
+  model20 %>% fit(
+    db[db[,83] != f, 1:81], 
+    db[db[,83] != f, 82], 
+    epochs = 20, 
+    verbose = 0
+  )
+
+  # Predict classes for test data
+  mod20class <- model20 %>% predict_classes(db[db[,83] == f, 1:81], batch_size = 128)
+
+  # Evaluation
+  mod20result <- confusionMatrix(as.factor(mod20class), as.factor(db[db[,83] == f, 82]), mode="prec_recall", positive = "1")
+  eval20$accuracy[f] <- mod20result$overall['Accuracy']
+  eval20$precision[f] <- mod20result$byClass['Precision']
+  eval20$recall[f] <- mod20result$byClass['Recall']
+  eval20$f1[f] <- mod20result$byClass['F1']
+  mod20roc <- roc(as.numeric(db[db[,83] == f, 82]), as.numeric(mod20class))
+  eval20$auc[f] <- auc(mod20roc)
+}
+
+eval20
+summary(eval20) # The mean of each evaluation metric is: Accuracy: 0.5674, Precision: 0.5774, Recall: 0.5101, f1: 0.5405, AUC: 0.5675
+```
+
+Let's compare the four model configurations that had 10-fold cross validation run on them.
+```{r Compare Structure Configurations}
+# 1 hidden layer: 16
+summary(eval2)[4,] # Had the highest mean accuracy, precision, and AUC
+
+# 2 hidden layers: 16/16
+summary(eval7)[4,] # Had the highest recall and F1
+
+# 3 hidden layers: 16/32/16
+summary(eval20)[4,]
+```
+
+Model 2 (16 neurons) had the highest mean accuracy (0.5799), precision (0.5958), and AUC (0.5800) of these three models. Model 7 (16/16) had the highest mean recall (0.5359) and f1 score (0.5574). Model 7 also had the second highest mean accuracy (0.5745) and AUC (0.5746), both of which are less than 0.01 less than those of Model 2. Model 7 also has the second highest precision (0.5821). Given that we want to prioritize recall, i.e., having the model identify a high rate of truly positive cases as positive, and that the accuracy and AUC are close to the best performer in those respects, the configuration of Model 7 (16/16) will be selected to move forward with.
+
+
+## Batch size
+
+The batch size is how many samples the network goes through before updating the weights and biases while training. Increasing the batch size can potentially help the optimizer escape local minima when trying to minimize the output of the loss function. We're going to try increasing the batch size used for training from the default (32) to 64 to see if there is a change in performance (batch size located in 'Fit model'). 
+
+**Test Model 23: Batch Size 64**
+```{r Test Model 23: Batch size 64, message=FALSE}
+# Create model
+tmodel23 <- keras_model_sequential()
+
+# Create layers
+tmodel23 %>%
+  layer_dense(units = 16, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel23 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training23 <- tmodel23 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 64, # Updated
+  verbose = 0
+ )
+
+# Plot training
+plot(training23) # Doesn't appear much different than previous attempts
+
+# Predict classes for test data
+tmod23class <- tmodel23 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128) # Batch size here just relates to computation and doesn't affect outcome
+
+# Evaluation
+tmod23result <- confusionMatrix(as.factor(tmod23class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod23result # Test set accuracy is 0.58 - very slightly higher than before. Precision is 0.5909 (higher), Recall is 0.5241 (slightly reduced), with F1 0.5555. Precision is better but recall is worse than for a batch size of 32
+tmod23roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod23class))
+auc(tmod23roc) # AUC = 0.58 - very slightly higher than before
+```
+
+Let's try with a batch size of 128 as well to see if it makes a difference.
+
+**Test Model 24: Batch Size 128**
+```{r Test Model 24: Batch size 128, message=FALSE}
+# Create model
+tmodel24 <- keras_model_sequential()
+
+# Create layers
+tmodel24 %>%
+  layer_dense(units = 16, activation = 'relu', input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel24 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training24 <- tmodel24 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 128, # Updated
+  verbose = 0
+ )
+
+# Plot training
+plot(training24) 
+
+# Predict classes for test data
+tmod24class <- tmodel24 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod24result <- confusionMatrix(as.factor(tmod24class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod24result # Test set accuracy is 0.5743 - similar to batch size of 32. Precision is 0.5797, Recall is 0.5458 (a bit higher), and F1 is 0.5622 (higher)
+tmod24roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod24class))
+auc(tmod24roc) # AUC = 0.5877 - higher than for batch size of 32
+```
+
+Test Model 24, with a batch size of 128, had a similar accuracy, precision, and AUC to Test Model 7 (batch size 32), with a higher recall and f1 score. Let's try running test model 24 with cross validation to see how it performs.
+
+**Cross Validation for Model 24: Batch Size 128**
+```{r Model 24 with Cross Validation: Batch size 128, message=FALSE}
+# Create empty dataframe to house evaluation measures
+accuracy <- rep(0, times = 10)
+precision <- rep(0, times = 10)
+recall <- rep(0, times = 10)
+f1 <- rep(0, times = 10)
+auc <- rep(0, times = 10)
+eval24 <- as.data.frame(cbind(accuracy, precision, recall, f1, auc))
+
+# Train model per fold
+for (f in 1:10){
+
+  # Initiate
+  model24 <- keras_model_sequential()
+  
+  # Layers
+  model24 %>%
+    layer_dense(units = 16, activation = 'relu', input_shape = c(81)) %>%
+    layer_dense(units = 16, activation = 'relu') %>%
+    layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+  model24 %>% compile(
+    loss = 'binary_crossentropy',
+    optimizer = 'adam',
+    metrics = 'accuracy'
+  )
+
+  # Train
+  model24 %>% fit(
+    db[db[,83] != f, 1:81], 
+    db[db[,83] != f, 82], 
+    epochs = 20, 
+    batch_size = 128,
+    verbose = 0
+  )
+
+  # Predict classes for test data
+  mod24class <- model24 %>% predict_classes(db[db[,83] == f, 1:81], batch_size = 128)
+
+  # Evaluation
+  mod24result <- confusionMatrix(as.factor(mod24class), as.factor(db[db[,83] == f, 82]), mode="prec_recall", positive = "1")
+  eval24$accuracy[f] <- mod24result$overall['Accuracy']
+  eval24$precision[f] <- mod24result$byClass['Precision']
+  eval24$recall[f] <- mod24result$byClass['Recall']
+  eval24$f1[f] <- mod24result$byClass['F1']
+  mod24roc <- roc(as.numeric(db[db[,83] == f, 82]), as.numeric(mod24class))
+  eval24$auc[f] <- auc(mod24roc)
+}
+
+eval24
+summary(eval24) # The mean of each evaluation metric is: Accuracy: 0.5783, Precision: 0.5871, Recall: 0.5349, f1: 0.5592, AUC: 0.5784
+```
+
+Let's compare the two model configurations (batch size of 32 and 128) that had 10-fold cross validation run on them.
+```{r Compare Batch Size Configurations}
+# Batch size of 32
+summary(eval7)[4,] # Had the highest mean recall, though only by 0.001
+
+# Batch size of 128
+summary(eval24)[4,] # Had the highest mean accuracy, precision, f1 and AUC
+```
+
+We will switch to the batch size of 128 due to the slightly higher overall evaluation metrics.
+
+## Dropout Regularization
+
+In order to minimize overfitting and allow the model to generalize better, we're going to experiment with adding dropout layers. With dropout layers, a rate is chosen (e.g., 20% dropout), and that percentage of random inputs to the dropout layer are dropped (ignored) during training. This forces the model to generalize more. We are going to add a dropout layer after the input layer as well as after each hidden layer and experiment with a few different values for rate.
+
+**Test Model 25: 20% Dropout After Input and Hidden Layers**
+```{r Test Model 25: 20 Percent Dropout After Input and Hidden Layers, message=FALSE}
+# Create model
+tmodel25 <- keras_model_sequential()
+
+# Create layers
+tmodel25 %>%
+  layer_dropout(rate = 0.2, input_shape = c(81)) %>% # Dropout layer after input layer
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.2) %>% # Dropout layer after first hidden layer
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.2) %>% # Dropout layer after second hidden layer
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel25 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training25 <- tmodel25 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 128,
+  verbose = 0
+ )
+
+# Plot training
+plot(training25) # The validation loss and accuracy lines are following the training ones slightly more closely now, which we want to see. The validation set accuracy is decreasing towards the end though, which we don't want
+
+# Predict classes for test data
+tmod25class <- tmodel25 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod25result <- confusionMatrix(as.factor(tmod25class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod25result # Test set accuracy is 0.6022 - improved! Recall is 0.5598 with Precision at 0.6126, which are both improved as well
+tmod25roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod25class))
+auc(tmod25roc) # 0.6023 - also improved
+```
+
+
+Let's try with a higher dropout rate, at 50% for each layer.
+
+**Test Model 26: 50% Dropout After Input and Hidden Layers**
+```{r Test Model 26: 50 Percent Dropout After Input and Hidden Layers, message=FALSE}
+# Create model
+tmodel26 <- keras_model_sequential()
+
+# Create layers
+tmodel26 %>%
+  layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel26 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training26 <- tmodel26 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 128,
+  verbose = 0
+ )
+
+# Plot training
+plot(training26) # The validation lines for loss and accuracy follow the training lines even more closely in trend and shape.
+
+# Predict classes for test data
+tmod26class <- tmodel26 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod26result <- confusionMatrix(as.factor(tmod26class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod26result # Test set accuracy is 0.6194. Recall at 0.6187, Precision at 0.6204, F1 at 0.6196. All of these are the best yet.
+tmod26roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod26class))
+auc(tmod26roc) # AUC = 0.6194 - also the best yet
+```
+
+Let's try with a different dropout rate for after the input layer than after the hidden layers.
+
+**Test Model 27: 50% Dropout After Input Layer with 20% Dropout After Each Hidden Layer**
+```{r Test Model 27: 50 Percent Dropout After Input Layer with 20 Percent Dropout After Each Hidden Layer, message=FALSE}
+# Create model
+tmodel27 <- keras_model_sequential()
+
+# Create layers
+tmodel27 %>%
+  layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.2) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.2) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel27 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training27 <- tmodel27 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 128,
+  verbose = 0
+ )
+
+# Plot training
+plot(training27) # The validation lines for loss and accuracy follow the training lines a little less closely than the previous iteration
+
+# Predict classes for test data
+tmod27class <- tmodel27 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod27result <- confusionMatrix(as.factor(tmod27class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod27result # Test set accuracy is 0.603. Recall at 0.5440 - decreased from last test. Precision is still high at 0.6177
+tmod27roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod27class))
+auc(tmod27roc) # AUC = 0.6031
+```
+
+**Test Model 28: 80% Dropout After Input Layer with 50% Dropout After Each Hidden Layer**
+```{r Test Model 28: 80 Percent Dropout After Input Layer with 50 Percent Dropout After Each Hidden Layer, message=FALSE}
+# Create model
+tmodel28 <- keras_model_sequential()
+
+# Create layers
+tmodel28 %>%
+  layer_dropout(rate = 0.8, input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel28 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training28 <- tmodel28 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 128,
+  verbose = 0
+ )
+
+# Plot training
+plot(training28) # The validation line for loss actually stays consistently below the training loss line, although the validation accuracy line is a bit erratic
+
+# Predict classes for test data
+tmod28class <- tmodel28 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod28result <- confusionMatrix(as.factor(tmod28class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod28result # Test set accuracy is 0.6137. Recall is 0.6366 - the highest yet. Precision = 0.6095, F1 = 0.6227
+tmod28roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod28class))
+auc(tmod28roc) # AUC = 0.6137
+```
+
+Test Model 26, with a 50% droput after every layer, had better performance in all metrics than Model 24 (the one to beat). It had the highest accuracy (0.6194) and AUC (0.6194) so far. Test Model 28 had 80% dropout after the input layer with 50% dropout after each hidden layer, and had the highest recall yet, at 0.6366. As such, we will use cross-validation on both of these test models to compare them accurately.
+
+**Cross Validation for Model 26: 50% Dropout After Input and Hidden Layers**
+```{r Model 26 with Cross Validation: 50 Percent Dropout After Input and Hidden Layers, message=FALSE}
+# Create empty dataframe to house evaluation measures
+accuracy <- rep(0, times = 10)
+precision <- rep(0, times = 10)
+recall <- rep(0, times = 10)
+f1 <- rep(0, times = 10)
+auc <- rep(0, times = 10)
+eval26 <- as.data.frame(cbind(accuracy, precision, recall, f1, auc))
+
+# Train model per fold
+for (f in 1:10){
+
+  # Initiate
+  model26 <- keras_model_sequential()
+  
+  # Layers
+  model26 %>%
+    layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+    layer_dense(units = 16, activation = 'relu') %>%
+    layer_dropout(rate = 0.5) %>%
+    layer_dense(units = 16, activation = 'relu') %>%
+    layer_dropout(rate = 0.5) %>%
+    layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+  model26 %>% compile(
+    loss = 'binary_crossentropy',
+    optimizer = 'adam',
+    metrics = 'accuracy'
+  )
+
+  # Train
+  model26 %>% fit(
+    db[db[,83] != f, 1:81], 
+    db[db[,83] != f, 82], 
+    epochs = 20, 
+    batch_size = 128,
+    verbose = 0
+  )
+
+  # Predict classes for test data
+  mod26class <- model26 %>% predict_classes(db[db[,83] == f, 1:81], batch_size = 128)
+
+  # Evaluation
+  mod26result <- confusionMatrix(as.factor(mod26class), as.factor(db[db[,83] == f, 82]), mode="prec_recall", positive = "1")
+  eval26$accuracy[f] <- mod26result$overall['Accuracy']
+  eval26$precision[f] <- mod26result$byClass['Precision']
+  eval26$recall[f] <- mod26result$byClass['Recall']
+  eval26$f1[f] <- mod26result$byClass['F1']
+  mod26roc <- roc(as.numeric(db[db[,83] == f, 82]), as.numeric(mod26class))
+  eval26$auc[f] <- auc(mod26roc)
+}
+
+eval26
+summary(eval26) # The mean of each evaluation metric is: Accuracy: 0.6010, Precision: 0.6083, Recall: 0.5730, f1: 0.5890, AUC: 0.6010
+```
+
+**Cross Validation for Model 28: 80% Dropout After Input Layer with 50% Dropout After Each Hidden Layer**
+```{r Model 28 with Cross Validation: 80 Percent Dropout After Input with 50 Percent Dropout After Each Hidden Layer, message=FALSE}
+# Create empty dataframe to house evaluation measures
+accuracy <- rep(0, times = 10)
+precision <- rep(0, times = 10)
+recall <- rep(0, times = 10)
+f1 <- rep(0, times = 10)
+auc <- rep(0, times = 10)
+eval28 <- as.data.frame(cbind(accuracy, precision, recall, f1, auc))
+
+# Train model per fold
+for (f in 1:10){
+
+  # Initiate
+  model28 <- keras_model_sequential()
+  
+  # Layers
+  model28 %>%
+    layer_dropout(rate = 0.8, input_shape = c(81)) %>%
+    layer_dense(units = 16, activation = 'relu') %>%
+    layer_dropout(rate = 0.5) %>%
+    layer_dense(units = 16, activation = 'relu') %>%
+    layer_dropout(rate = 0.5) %>%
+    layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+  model28 %>% compile(
+    loss = 'binary_crossentropy',
+    optimizer = 'adam',
+    metrics = 'accuracy'
+  )
+
+  # Train
+  model28 %>% fit(
+    db[db[,83] != f, 1:81], 
+    db[db[,83] != f, 82], 
+    epochs = 20, 
+    batch_size = 128,
+    verbose = 0
+  )
+
+  # Predict classes for test data
+  mod28class <- model28 %>% predict_classes(db[db[,83] == f, 1:81], batch_size = 128)
+
+  # Evaluation
+  mod28result <- confusionMatrix(as.factor(mod28class), as.factor(db[db[,83] == f, 82]), mode="prec_recall", positive = "1")
+  eval28$accuracy[f] <- mod28result$overall['Accuracy']
+  eval28$precision[f] <- mod28result$byClass['Precision']
+  eval28$recall[f] <- mod28result$byClass['Recall']
+  eval28$f1[f] <- mod28result$byClass['F1']
+  mod28roc <- roc(as.numeric(db[db[,83] == f, 82]), as.numeric(mod28class))
+  eval28$auc[f] <- auc(mod28roc)
+}
+
+eval28
+summary(eval28) # The mean of each evaluation metric is: Accuracy: 0.5825, Precision: 0.6156, Recall: 0.4946, f1: 0.5293, AUC: 0.5826. Of note, the recall between the folds has a large range, ranging from 0.31 to 0.96
+```
+
+Let's compare the two new model configurations (Models 26 and 28) that had 10-fold cross validation run on them against the model to beat, Model 24 (no dropout layers).
+```{r Compare Dropout Regularization}
+# No dropout layers
+summary(eval24)[4,]
+
+# All dropout layers 50%
+summary(eval26)[4,] # Had the highest mean accuracy, recall, f1 and AUC
+
+# 80% dropout after input layer, 50% dropout after hidden layers
+summary(eval28)[4,] # Had the highest mean precision
+```
+
+We will be moving forward with Model 26 (50% dropout after every layer), as it has the highest evaluation metric in every category except for precision, where it was less than 0.01 less than the highest performer in that category. Additionally, Model 28 had a large range of values for recall between folds (ranging from about 0.31 to 0.96), indicating that it isn't performing consistently.
+
+
+## Weight regularization
+
+In order to further counter the overfitting, we're going experiment with adding some weight regularization as well. Weight regularization works by adding an additional term to the cost function, leading to a reduction in the values of weights. The idea is that the lower weights lead to a simpler model, which should be beneficial in addressing overfitting. There are two types of weight regularization, L1 and L2 (weight decay). L1 adds the term to the cost function based on the absolute values of the weights, whereas L2 adds the term based on the squared value of the weights. As such, the weights may be reduced to zero in L1 but not in L2, which is why L2 is generally preferred over L1.
+
+First we will try L1 regularization with a couple different weights.
+
+**Test Model 29: L1 Regularization with Rate of 0.001**
+```{r Test Model 29: L1 Regularization with Rate of 0.001, message=FALSE}
+# Create model
+tmodel29 <- keras_model_sequential()
+
+# Create layers
+tmodel29 %>%
+  layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu', kernel_regularizer = regularizer_l1(l = 0.001)) %>% # Add the regularizer and rate to each hidden layer
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 16, activation = 'relu', kernel_regularizer = regularizer_l1(l = 0.001)) %>% # Added here too
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel29 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training29 <- tmodel29 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 128,
+  verbose = 0
+ )
+
+# Plot training
+plot(training29) # The training set very quickly reaches it's final value for loss and accuracy. The validation accuracy peaks quickly, with values that are lower than what we've already seen
+
+# Predict classes for test data
+tmod29class <- tmodel29 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod29result <- confusionMatrix(as.factor(tmod29class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod29result # Test set accuracy is 0.5845. Recall at 0.3429 (very low), Precision at 0.6653, F1 at 0.4526
+tmod29roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod29class))
+auc(tmod29roc) # AUC = 0.5849
+```
+
+**Test Model 30: L1 Regularization with Rate of 0.01**
+```{r Test Model 30: L1 Regularization with Rate of 0.01, message=FALSE}
+# Create model
+tmodel30 <- keras_model_sequential()
+
+# Create layers
+tmodel30 %>%
+  layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu', kernel_regularizer = regularizer_l1(l = 0.01)) %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 16, activation = 'relu', kernel_regularizer = regularizer_l1(l = 0.01)) %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel30 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training30 <- tmodel30 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 128,
+  verbose = 0
+ )
+
+# Plot training
+plot(training30) # Well this is a mess. The accuracy for each epoch is all over the place (training and validation), with the validation set loss never changing. This doesn't appear to be a viable parameter configuration
+
+# Predict classes for test data
+tmod30class <- tmodel30 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod30result <- confusionMatrix(as.factor(tmod30class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod30result # Test set accuracy is 0.5008. Recall is at 1.0, because the model just guessed 1 for every prediction. We will not be using this configuration
+tmod30roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod30class))
+auc(tmod30roc) # AUC = 0.5
+```
+
+Let's try L2 regularization (weight decay) with a few different rates.
+
+**Test Model 31: L2 Regularization with Rate of 0.001**
+```{r Test Model 31: L2 Regularization with Rate of 0.001, message=FALSE}
+# Create model
+tmodel31 <- keras_model_sequential()
+
+# Create layers
+tmodel31 %>%
+  layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 16, activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel31 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training31 <- tmodel31 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 128,
+  verbose = 0
+ )
+
+# Plot training
+plot(training31) # The validation set accuracy appears to be decreasing by the end, which we do not want. Otherwise, the two loss lines are closely following one another
+
+# Predict classes for test data
+tmod31class <- tmodel31 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod31result <- confusionMatrix(as.factor(tmod31class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod31result # Test set accuracy is 0.5853. Recall is fairly low, 0.3777
+tmod31roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod31class))
+auc(tmod31roc) # AUC = 0.5856
+```
+
+**Test Model 32: L2 Regularization with Rate of 0.01**
+```{r Test Model 32: L2 Regularization with Rate of 0.01, message=FALSE}
+# Create model
+tmodel32 <- keras_model_sequential()
+
+# Create layers
+tmodel32 %>%
+  layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 16, activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel32 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training32 <- tmodel32 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 128,
+  verbose = 0
+ )
+
+# Plot training
+plot(training32) # The validation accuracy points seem somewhat erratic, and may be decreasing by the end
+
+# Predict classes for test data
+tmod32class <- tmodel32 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod32result <- confusionMatrix(as.factor(tmod32class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod32result # Test set accuracy is 0.5901. Recall is fairly low, 0.4233
+tmod32roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod32class))
+auc(tmod32roc) # AUC = 0.5904
+```
+
+Overall, these four test models performed quite poorly, so we will not be moving forward with cross validation for any of these variants. It's likely that the dropout layers we previously added provide enough to regularize the weights already. We will continue to move forward with the model parameters that don't include weight regularization.
+
+
+## Optimizer
+
+The optimizer is the algorithm that manages the updates to the weights and biases of each neuron, leading to locating the local minima of the cost function (usually through some form of gradient descent). We have been using the Adam optimizer previously, which is an improvement on the RMSProp optimizer. We will try a few others to see if they improve model performance: namely Nadam and Adamax. Stochastic Gradient Descent (SGD) is an option, but is better suited to shallow networks, so we will not be using this.
+
+**Test Model 33: Nadam**
+```{r Test Model 33: Nadam, message=FALSE}
+# Create model
+tmodel33 <- keras_model_sequential()
+
+# Create layers
+tmodel33 %>%
+  layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel33 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'nadam', # Updated
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training33 <- tmodel33 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 128,
+  verbose = 0
+ )
+
+# Plot training
+plot(training33) # The two loss curves follow each other more closely. The validation set accuracy curves above that of the training set
+
+# Predict classes for test data
+tmod33class <- tmodel33 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod33result <- confusionMatrix(as.factor(tmod33class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod33result # Test set accuracy is 0.6034. Recall is 0.4959 - not the highest we've seen
+tmod33roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod33class))
+auc(tmod33roc) # AUC = 0.6036
+```
+
+**Test Model 34: Adamax**
+```{r Test Model 34: Adamax, message=FALSE}
+# Create model
+tmodel34 <- keras_model_sequential()
+
+# Create layers
+tmodel34 %>%
+  layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel34 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adamax',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training34 <- tmodel34 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 128,
+  verbose = 0
+ )
+
+# Plot training
+plot(training34) # The model appears to be learning more slowly, as the loss and accuracy for both training and validation set don't appear to have hit a constant value for each yet
+
+# Predict classes for test data
+tmod34class <- tmodel34 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod34result <- confusionMatrix(as.factor(tmod34class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod34result # Test set accuracy is 0.5969. Recall is 0.4599 - not great
+tmod34roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod34class))
+auc(tmod34roc) # AUC = 0.5971
+```
+
+Let's try that last model again, with more epochs to see if it hits a better constant value.
+
+**Test Model 35: Adamax with 50 Epochs**
+```{r Test Model 35: Adamax with 50 Epochs, message=FALSE}
+# Create model
+tmodel35 <- keras_model_sequential()
+
+# Create layers
+tmodel35 %>%
+  layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel35 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adamax',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training35 <- tmodel35 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 50,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 128,
+  verbose = 0
+ )
+
+# Plot training
+plot(training35) # Looks great. Still continuing to increase in accuracy and decrease in loss for both sets though. Need more epochs to see it stabilize
+
+# Predict classes for test data
+tmod35class <- tmodel35 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod35result <- confusionMatrix(as.factor(tmod35class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod35result # Test set accuracy is 0.6075. Recall is 0.6344
+tmod35roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod35class))
+auc(tmod35roc) # AUC = 0.6074
+```
+
+Let's try it again with 200 epochs.
+
+**Test Model 36: Adamax with 200 Epochs**
+```{r Test Model 36: Adamax with 200 Epochs, message=FALSE}
+# Create model
+tmodel36 <- keras_model_sequential()
+
+# Create layers
+tmodel36 %>%
+  layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel36 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adamax',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training36 <- tmodel36 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 200,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 128,
+  verbose = 0
+ )
+
+# Plot training
+plot(training36) # I wouldn't add any more epochs. The values appear to have stabilized for the most part.
+
+# Predict classes for test data
+tmod36class <- tmodel36 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod36result <- confusionMatrix(as.factor(tmod36class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod36result # Test set accuracy is 0.61. Recall is 0.6263. Precision = 0.6073, f1 = 0.6167
+tmod36roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod36class))
+auc(tmod36roc) # 0.61
+```
+
+Let's use cross validation on Model 36 (Adamax optimizer with 200 epochs) to better evaluate it and compare to other tests, as it performed the best out of the different new optimizers tried.
+
+**Cross Validation for Model 36: Adamax with 200 Epochs**
+```{r Model 36 with Cross Validation: Adamax with 200 Epochs, message=FALSE}
+# Create empty dataframe to house evaluation measures
+accuracy <- rep(0, times = 10)
+precision <- rep(0, times = 10)
+recall <- rep(0, times = 10)
+f1 <- rep(0, times = 10)
+auc <- rep(0, times = 10)
+eval36 <- as.data.frame(cbind(accuracy, precision, recall, f1, auc))
+
+# Train model per fold
+for (f in 1:10){
+
+  # Initiate
+  model36 <- keras_model_sequential()
+  
+  # Layers
+  model36 %>%
+    layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+    layer_dense(units = 16, activation = 'relu') %>%
+    layer_dropout(rate = 0.5) %>%
+    layer_dense(units = 16, activation = 'relu') %>%
+    layer_dropout(rate = 0.5) %>%
+    layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+  model36 %>% compile(
+    loss = 'binary_crossentropy',
+    optimizer = 'adamax',
+    metrics = 'accuracy'
+  )
+
+  # Train
+  model36 %>% fit(
+    db[db[,83] != f, 1:81], 
+    db[db[,83] != f, 82], 
+    epochs = 200, 
+    batch_size = 128,
+    verbose = 0
+  )
+
+  # Predict classes for test data
+  mod36class <- model36 %>% predict_classes(db[db[,83] == f, 1:81], batch_size = 128)
+
+  # Evaluation
+  mod36result <- confusionMatrix(as.factor(mod36class), as.factor(db[db[,83] == f, 82]), mode="prec_recall", positive = "1")
+  eval36$accuracy[f] <- mod36result$overall['Accuracy']
+  eval36$precision[f] <- mod36result$byClass['Precision']
+  eval36$recall[f] <- mod36result$byClass['Recall']
+  eval36$f1[f] <- mod36result$byClass['F1']
+  mod36roc <- roc(as.numeric(db[db[,83] == f, 82]), as.numeric(mod36class))
+  eval36$auc[f] <- auc(mod36roc)
+}
+
+eval36
+summary(eval36) # The mean of each evaluation metric is: Accuracy: 0.6001, Precision: 0.6084, Recall: 0.5663, f1: 0.5861, AUC: 0.6001.
+```
+
+Let's compare the two model configurations (Models 26 and 36) that had 10-fold cross validation run on them.
+```{r Compare Optimizers}
+# Adam optimizer, 20 epochs
+summary(eval26)[4,] # Had the highest mean accuracy, recall, f1 and AUC
+
+# Adamax optimizer, 200 epochs
+summary(eval36)[4,] # Had the highest mean precision
+```
+
+Based on the specifications above, Model 26 (Adam optimizer) still performed slightly better overall, so we will move forward with that one.
+
+Let's take a moment to look at the individual weights and biases for Test Model 26, to see what the network did.
+```{r Review Weights and Biases}
+get_weights(tmodel26) # Most values have a magnitude less than 1, and none appear to have a magnitude greater than 3. None of the biases have a negative value larger than 1, indicating that we likely haven't run into the dying ReLU problem (a neuron no longer getting activated due to the activation function ReLU). This may often be identified by biases with a large negative value. It may still be beneficial to try out another activation function to see how it performs.
+```
+
+## Activation Function
+
+The activation function is the function applied to the weights and biases of each input to each neuron (excluding the inputs to the input layer) that alters or condenses values. We have been using the Rectified Linear Unit (ReLU) activation function. We are also going to try the Scaled Exponential Linear Unit (SELU) to see if it improves performance at all. SELU fixes the dying ReLU problem (even though that is likely not an issue here), and also avoids the vanishing gradient issue associated with the sigmoid activation function.
+
+**Test Model 37: SELU**
+```{r Test Model 37: SELU, message=FALSE}
+# Create model
+tmodel37 <- keras_model_sequential()
+
+# Create layers
+tmodel37 %>%
+  layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'selu') %>% # Updated from ReLU to SELU for each dense hidden layer
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 16, activation = 'selu') %>% # Updated from ReLU to SELU for each dense hidden layer
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel37 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training37 <- tmodel37 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 20,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 128,
+  verbose = 0
+ )
+
+# Plot training
+plot(training37) # The values appear to have stabilized by the 20th epoch
+
+# Predict classes for test data
+tmod37class <- tmodel37 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod37result <- confusionMatrix(as.factor(tmod37class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod37result # Test set accuracy is 0.6115. Recall lower at 0.5393, Precision at 0.6313, F1 at 0.5817.
+tmod37roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod37class))
+auc(tmod37roc) # 0.6117
+```
+
+Let's try cross-validation out on Test Model 37 so that we may better compare it to the leading best performer, Model 26 (ReLU).
+
+**Cross Validation for Model 37: SELU**
+```{r Model 37 with Cross Validation: SELU, message=FALSE}
+# Create empty dataframe to house evaluation measures
+accuracy <- rep(0, times = 10)
+precision <- rep(0, times = 10)
+recall <- rep(0, times = 10)
+f1 <- rep(0, times = 10)
+auc <- rep(0, times = 10)
+eval37 <- as.data.frame(cbind(accuracy, precision, recall, f1, auc))
+
+# Train model per fold
+for (f in 1:10){
+
+  # Initiate
+  model37 <- keras_model_sequential()
+  
+  # Layers
+  model37 %>%
+    layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+    layer_dense(units = 16, activation = 'selu') %>%
+    layer_dropout(rate = 0.5) %>%
+    layer_dense(units = 16, activation = 'selu') %>%
+    layer_dropout(rate = 0.5) %>%
+    layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+  model37 %>% compile(
+    loss = 'binary_crossentropy',
+    optimizer = 'adam',
+    metrics = 'accuracy'
+  )
+
+  # Train
+  model37 %>% fit(
+    db[db[,83] != f, 1:81], 
+    db[db[,83] != f, 82], 
+    epochs = 20, 
+    batch_size = 128,
+    verbose = 0
+  )
+
+  # Predict classes for test data
+  mod37class <- model37 %>% predict_classes(db[db[,83] == f, 1:81], batch_size = 128)
+
+  # Evaluation
+  mod37result <- confusionMatrix(as.factor(mod37class), as.factor(db[db[,83] == f, 82]), mode="prec_recall", positive = "1")
+  eval37$accuracy[f] <- mod37result$overall['Accuracy']
+  eval37$precision[f] <- mod37result$byClass['Precision']
+  eval37$recall[f] <- mod37result$byClass['Recall']
+  eval37$f1[f] <- mod37result$byClass['F1']
+  mod37roc <- roc(as.numeric(db[db[,83] == f, 82]), as.numeric(mod37class))
+  eval37$auc[f] <- auc(mod37roc)
+}
+
+eval37
+summary(eval37) # The mean of each evaluation metric is: Accuracy: 0.5999, Precision: 0.6153, Recall: 0.5361, f1: 0.5729, AUC: 0.6000.
+```
+
+Let's compare the two model configurations (Models 26 and 37) that had 10-fold cross validation run on them.
+```{r Compare Activation Function}
+# ReLU
+summary(eval26)[4,] # Had the highest mean accuracy, recall, f1 and AUC
+
+# SELU
+summary(eval37)[4,] # Had the highest mean precision
+```
+
+Model 26 is the best performer here, with all evaluation metrics higher except for precision. Recall is quite a bit higher for Model 26 as well.
+
+
+## Epochs for Final Model
+
+An epoch is one iteration of all training data going through the model. Now that we have selected the best performing model configuration from the parameters tuned, we will try running it with more epochs to see if it improves further with more training. Let's try it with 50 epochs first (up from 20).
+
+**Test Model 38: 50 Epochs**
+```{r Test Model 38: 50 Epochs, message=FALSE}
+# Create model
+tmodel38 <- keras_model_sequential()
+
+# Create layers
+tmodel38 %>%
+  layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel38 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training38 <- tmodel38 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 50, # Updated
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 128,
+  verbose = 0
+ )
+
+# Plot training
+plot(training38) # The accuracy for both sets still appears as if it may be improving, with the loss still decreasing
+
+# Predict classes for test data
+tmod38class <- tmodel38 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod38result <- confusionMatrix(as.factor(tmod38class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod38result # Test set accuracy is 0.6140. Recall at 0.6291, Precision at 0.6140, F1 at 0.6214. These appear to be an improvement over the 20 epoch model
+tmod38roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod38class))
+auc(tmod38roc) # AUC = 0.6161
+```
+
+Let's try with a 100 epochs to see if there is any further improvement.
+
+**Test Model 39: 100 Epochs**
+```{r Test Model 39: 100 Epochs, message=FALSE}
+# Create model
+tmodel39 <- keras_model_sequential()
+
+# Create layers
+tmodel39 %>%
+  layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 16, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+tmodel39 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = 'accuracy'
+ )
+
+# Fit model
+training39 <- tmodel39 %>% fit(
+  db[db[,83] != 1, 1:81], 
+  db[db[,83] != 1, 82], 
+  epochs = 100,
+  validation_data = list(db[db[,83] == 1, 1:81], db[db[,83] == 1, 82]),
+  batch_size = 128,
+  verbose = 0
+ )
+
+# Plot training
+plot(training39) # The validation set accuracy appears to peak around 50 epochs and then start trending down. The validation set loss also decreases to around 50 epochs before starting to gradually increase again. 50 epochs is likely a good amount for model training
+
+# Predict classes for test data
+tmod39class <- tmodel39 %>% predict_classes(db[db[,83] == 1, 1:81], batch_size = 128)
+
+# Evaluation
+tmod39result <- confusionMatrix(as.factor(tmod39class), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1")
+tmod39result # Test set accuracy is 0.6067. Recall at 0.5192, Precision at 0.6303, F1 at 0.5694. Scores, particularly recall, have decreased from the last iteration
+tmod39roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(tmod39class))
+auc(tmod39roc) # AUC = 0.6068
+```
+
+Let's try using cross validation to better evaluate the model with 50 epochs (Test Model 38).
+
+**Cross Validation for Model 38: 50 Epochs**
+```{r Model 38 with Cross Validation: 50 Epochs, message=FALSE}
+# Create empty dataframe to house evaluation measures
+accuracy <- rep(0, times = 10)
+precision <- rep(0, times = 10)
+recall <- rep(0, times = 10)
+f1 <- rep(0, times = 10)
+auc <- rep(0, times = 10)
+eval38 <- as.data.frame(cbind(accuracy, precision, recall, f1, auc))
+
+# Train model per fold
+for (f in 1:10){
+
+  # Initiate
+  model38 <- keras_model_sequential()
+  
+  # Layers
+  model38 %>%
+    layer_dropout(rate = 0.5, input_shape = c(81)) %>%
+    layer_dense(units = 16, activation = 'relu') %>%
+    layer_dropout(rate = 0.5) %>%
+    layer_dense(units = 16, activation = 'relu') %>%
+    layer_dropout(rate = 0.5) %>%
+    layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+  model38 %>% compile(
+    loss = 'binary_crossentropy',
+    optimizer = 'adam',
+    metrics = 'accuracy'
+  )
+
+  # Train
+  model38 %>% fit(
+    db[db[,83] != f, 1:81], 
+    db[db[,83] != f, 82], 
+    epochs = 50, 
+    batch_size = 128,
+    verbose = 0
+  )
+
+  # Predict classes for test data
+  mod38class <- model38 %>% predict_classes(db[db[,83] == f, 1:81], batch_size = 128)
+
+  # Evaluation
+  mod38result <- confusionMatrix(as.factor(mod38class), as.factor(db[db[,83] == f, 82]), mode="prec_recall", positive = "1")
+  eval38$accuracy[f] <- mod38result$overall['Accuracy']
+  eval38$precision[f] <- mod38result$byClass['Precision']
+  eval38$recall[f] <- mod38result$byClass['Recall']
+  eval38$f1[f] <- mod38result$byClass['F1']
+  mod38roc <- roc(as.numeric(db[db[,83] == f, 82]), as.numeric(mod38class))
+  eval38$auc[f] <- auc(mod38roc)
+}
+
+eval38
+summary(eval38) # The mean of each evaluation metric is: Accuracy: 0.6017, Precision: 0.6086, Recall: 0.5763, f1: 0.5916, AUC: 0.6018.
+```
+
+Let's compare the two model configurations (Models 26 and 38) that had 10-fold cross validation run on them.
+```{r Compare Number of Epochs}
+# 20 Epochs
+summary(eval26)[4,]
+
+# 50 Epochs
+summary(eval38)[4,] # The highest by a small amount in every category
+```
+
+Model 38 had the highest evaluation metric in every category by a small amount. Therefore, the optimized neural network algorithm is Model 38: an input layer of 81 neurons, two hidden layers with 16 neurons each, and an output layer with one neuron and the sigmoid activation function. The hidden layers each use the ReLU activation function. There is a dropout layer with 50% dropout after the input layer and each of the hidden layers. The optimizer Adam is used, with a batch size of 128 and 50 epochs. No weight regularization is used.
+
+Now that we have optimized our neural network algorithm, we will try out a few traditional classifiers for comparison: k-Nearest Neighbours (kNN), Random Forest, and Logistic Regression.
+
+
+# kNN Model Creation and Evaluation
+
+The k-nearest neighbours algorithm (kNN) classifies cases based on their proximity to known cases using a distance function. The main parameter we will change here to optimize the network is the k value, which is the number of nearest neighbours considered in each calculation.
+
+```{r Set Seed}
+set.seed(31) # Make results reproducible
+```
+
+First we will test an example with k = 5.
+
+**Test k = 5**
+```{r k of 5, message=FALSE}
+knn5 <- knn(train = db[db[,83] != 1, 1:81], test = db[db[,83] == 1, 1:81], cl = db[db[,83] != 1, 82], k = 5) # Took about 7 min to run; not feasible to systematically go through every k from 1:100 (etc) to identify optimal k
+confusionMatrix(as.factor(knn5), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy is 0.5337 Recall somewhat low at 0.4140
+knn5roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(knn5))
+auc(knn5roc) # AUC is 0.5338
+```
+
+We will test a few more k values individually, as it is not feasible computationally to run through a large sequence of k values to test.
+
+**Test k = 15**
+```{r k of 15, message=FALSE}
+knn15 <- knn(train = db[db[,83] != 1, 1:81], test = db[db[,83] == 1, 1:81], cl = db[db[,83] != 1, 82], k = 15)
+confusionMatrix(as.factor(knn15), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.5258, Recall better than last iteration at 0.5724
+knn15roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(knn15))
+auc(knn15roc) # AUC = 0.5257
+```
+
+**Test k = 25**
+```{r k of 25, message=FALSE}
+knn25 <- knn(train = db[db[,83] != 1, 1:81], test = db[db[,83] == 1, 1:81], cl = db[db[,83] != 1, 82], k = 25)
+confusionMatrix(as.factor(knn25), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.5359, Recall = 0.5219
+knn25roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(knn25))
+auc(knn25roc) # AUC = 0.5359
+```
+
+**Test k = 35**
+```{r k of 35, message=FALSE}
+knn35 <- knn(train = db[db[,83] != 1, 1:81], test = db[db[,83] == 1, 1:81], cl = db[db[,83] != 1, 82], k = 35)
+confusionMatrix(as.factor(knn35), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.5319, Recall = 0.5369
+knn35roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(knn35))
+auc(knn35roc) # AUC = 0.5319
+```
+
+**Test k = 45**
+```{r k of 45, message=FALSE}
+knn45 <- knn(train = db[db[,83] != 1, 1:81], test = db[db[,83] == 1, 1:81], cl = db[db[,83] != 1, 82], k = 45)
+confusionMatrix(as.factor(knn45), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.5443, Recall = 0.5454
+knn45roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(knn45))
+auc(knn45roc) # AUC = 0.5443
+```
+
+**Test k = 55**
+```{r k of 55, message=FALSE}
+knn55 <- knn(train = db[db[,83] != 1, 1:81], test = db[db[,83] == 1, 1:81], cl = db[db[,83] != 1, 82], k = 55)
+confusionMatrix(as.factor(knn55), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.5481, Recall = 0.5574
+knn55roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(knn55))
+auc(knn55roc) # AUC = 0.5481
+```
+
+**Test k = 65**
+```{r k of 65, message=FALSE}
+knn65 <- knn(train = db[db[,83] != 1, 1:81], test = db[db[,83] == 1, 1:81], cl = db[db[,83] != 1, 82], k = 65)
+confusionMatrix(as.factor(knn65), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.5504, Recall = 0.5579
+knn65roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(knn65))
+auc(knn65roc) # AUC = 0.5504
+```
+
+Let's increase k values by 20 now, as evaluation metric values are still gradually increasing.
+
+**Test k = 85**
+```{r k of 85, message=FALSE}
+knn85 <- knn(train = db[db[,83] != 1, 1:81], test = db[db[,83] == 1, 1:81], cl = db[db[,83] != 1, 82], k = 85)
+confusionMatrix(as.factor(knn85), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.567, Recall = 0.5853, which is the best yet
+knn85roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(knn85))
+auc(knn85roc) # AUC = 0.567
+```
+
+**Test k = 105**
+```{r k of 105, message=FALSE}
+knn105 <- knn(train = db[db[,83] != 1, 1:81], test = db[db[,83] == 1, 1:81], cl = db[db[,83] != 1, 82], k = 105)
+confusionMatrix(as.factor(knn105), as.factor(db[db[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.5629, Recall = 0.5670, which is a decrease from the last iteration
+knn105roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(knn105))
+auc(knn105roc) # AUC = 0.5629
+```
+
+Since the evaluation metric values started to decrease from k = 85 to k = 105, we will move forward with k = 85, which resulted in the highest accuracy, recall, and AUC so far. We will use cross validation on this model configuration so that we may compare it to the other model types.
+
+**kNN Final Model: k = 85**
+```{r kNN Final Model: k of 85, message=FALSE}
+set.seed(31)
+
+# Create empty dataframe to house evaluation measures
+accuracy <- rep(0, times = 10)
+precision <- rep(0, times = 10)
+recall <- rep(0, times = 10)
+f1 <- rep(0, times = 10)
+auc <- rep(0, times = 10)
+eval.knn <- as.data.frame(cbind(accuracy, precision, recall, f1, auc))
+
+
+# Run algorithm for each group of folds; store evaluation metrics for each fold in a dataframe (eval.knn)
+for (f in 1:10){
+  knnclass <- knn(train = db[db[,83] != f, 1:81], test = db[db[,83] == f, 1:81], cl = db[db[,83] != f, 82], k = 85)
+  knnresult <- confusionMatrix(as.factor(knnclass), as.factor(db[db[,83] == f, 82]), mode="prec_recall", positive = "1")
+  eval.knn$accuracy[f] <- knnresult$overall['Accuracy']
+  eval.knn$precision[f] <- knnresult$byClass['Precision']
+  eval.knn$recall[f] <- knnresult$byClass['Recall']
+  eval.knn$f1[f] <- knnresult$byClass['F1']
+  knnroc <- roc(as.numeric(db[db[,83] == f, 82]), as.numeric(knnclass))
+  eval.knn$auc[f] <- auc(knnroc)
+} # Took about 60 min to run
+
+#Evaluate
+eval.knn
+summary(eval.knn) # Mean Accuracy = 0.5474, mean Precision = 0.5492, mean Recall = 0.5352, mean f1 = 0.5420, mean AUC = 0.5475
+```
+
+
+# Random Forest Model Creation and Evaluation
+
+The Random Forest algorithm creates a number of decision trees, which it then aggregates the results of in order to classify new cases. Parameters to tune with this model include the number of trees (ntree), the number of variables used per tree (mtry), the max number of nodes per tree terminal layer (maxnodes), and the number of data points required for a node to be created (nodesize).
+
+First we need to alter the data frame so that the target attribute (readmitted) is a factor instead of a number. We will also set a new seed here too.
+```{r Random Forest Prep}
+db.rf <- db.over # Copy to a new data frame (the version before it was turned into a matrix)
+db.rf$readmitted <- as.factor(db.rf$readmitted) # Convert the readmitted variable to a factor
+set.seed(26)
+```
+
+First we will test a baseline model with 100 trees and 9 variables per tree. Note that the OOB (out of bag) estimate of error rate is equal to the number of cases misclassified during training over the total number of cases.
+
+**100 Trees, 9 Variables per Tree**
+```{r 100 Trees; 9 Variables per Tree, message=FALSE}
+rforest1 <- randomForest(readmitted ~ ., data=db.rf[db.rf[,83] != 1, 1:82], ntree=100, mtry=9, importance=F) # Took about 6 min
+rforest1 # OOB (out of bag) estimate of  error rate: 0.22%
+rf1predict <- predict(rforest1, db.rf[db.rf[,83] == 1, 1:81])
+confusionMatrix(as.factor(rf1predict), as.factor(db.rf[db.rf[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.5047. Recall = 0.01392. It appears to have predicted pretty much all cases as 0. Appears to be overfitting based on low OOB error and accuract confusion matrix on training set
+rf1roc <- roc(as.numeric(db.rf[db.rf[,83] == 1, 82]), as.numeric(rf1predict))
+auc(rf1roc) # AUC = 0.5055 (basically the same as randomly guessing the class)
+```
+
+Let's try the same thing with 300 trees instead of 100.
+
+**300 Trees, 9 Variables per Tree**
+```{r 300 Trees; 9 Variables per Tree, message=FALSE}
+rforest2 <- randomForest(readmitted ~ ., data=db.rf[db.rf[,83] != 1, 1:82], ntree=300, mtry=9, importance=F) # Took 9 min (it's expected it would take longer than the last attempt)
+rforest2 # OOB estimate of error rate: 0.11%; even lower
+rf2predict <- predict(rforest2, db.rf[db.rf[,83] == 1, 1:81])
+confusionMatrix(as.factor(rf2predict), as.factor(db.rf[db.rf[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.5036 - worse, though not by much. Recall = 0.01126, which is worse as well
+rf2roc <- roc(as.numeric(db.rf[db.rf[,83] == 1, 82]), as.numeric(rf2predict))
+auc(rf2roc) # AUC = 0.5045
+```
+
+Clearly we need to alter some other parameters to address the overfitting. Let's try to decrease the number of features randomly selected per tree (mtry). We'll use 100 trees for now since it's quicker and didn't have much impact on the last test.
+
+**100 Trees, 6 Variables per Tree**
+```{r 100 Trees; 6 Variables per Tree, message=FALSE}
+rforest3 <- randomForest(readmitted ~ ., data=db.rf[db.rf[,83] != 1, 1:82], ntree=100, mtry=6, importance=F)
+rforest3 # OOB estimate of error rate: 0.71%, which is slightly higher. Let's see if it predicts any better
+rf3predict <- predict(rforest3, db.rf[db.rf[,83] == 1, 1:81])
+confusionMatrix(as.factor(rf3predict), as.factor(db.rf[db.rf[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.5098 - barely any better than the original. Recall = 0.02785
+rf3roc <- roc(as.numeric(db.rf[db.rf[,83] == 1, 82]), as.numeric(rf3predict))
+auc(rf3roc) # AUC = 0.5105
+```
+
+Altering the number of variables per tree didn't do much. Let's instead try setting the node size to a larger number (the default is 1) to make the trees smaller and less prone to overfitting.
+
+**100 Trees, 6 Variables per Tree, Node Size of 25**
+```{r 100 Trees; 6 Variables per Tree; Node Size of 25, message=FALSE}
+rforest4 <- randomForest(readmitted ~ ., data=db.rf[db.rf[,83] != 1, 1:82], ntree=100, mtry=6, nodesize = 25, importance=F)
+rforest4 # OOB estimate of error rate: 4.31%; going up
+rf4predict <- predict(rforest4, db.rf[db.rf[,83] == 1, 1:81])
+confusionMatrix(as.factor(rf4predict), as.factor(db.rf[db.rf[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.5499 - increased. Recall = 0.1408, also increased
+rf4roc <- roc(as.numeric(db.rf[db.rf[,83] == 1, 82]), as.numeric(rf4predict))
+auc(rf4roc) # AUC = 0.5505
+```
+
+Let's try a node size of 50 instead to reduce overfitting further.
+
+**100 Trees, 6 Variables per Tree, Node Size of 50**
+```{r 100 Trees; 6 Variables per Tree; Node Size of 50, message=FALSE}
+rforest5 <- randomForest(readmitted ~ ., data=db.rf[db.rf[,83] != 1, 1:82], ntree=100, mtry=6, nodesize = 50, importance=F)
+rforest5 # OOB estimate of error rate: 9.6%
+rf5predict <- predict(rforest5, db.rf[db.rf[,83] == 1, 1:81])
+confusionMatrix(as.factor(rf5predict), as.factor(db.rf[db.rf[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.5694 - increased. Recall = 0.2380, also increased
+rf5roc <- roc(as.numeric(db.rf[db.rf[,83] == 1, 82]), as.numeric(rf5predict))
+auc(rf5roc) # AUC = 0.5699
+```
+
+Since the dataset is large, and the test set accuracy is increasing with increased node sizes, let's try nodesize of 100.
+
+**100 Trees, 6 Variables per Tree, Node Size of 100**
+```{r 100 Trees; 6 Variables per Tree; Node Size of 100, message=FALSE}
+rforest6 <- randomForest(readmitted ~ ., data=db.rf[db.rf[,83] != 1, 1:82], ntree=100, mtry=6, nodesize = 100, importance=F)
+rforest6 # OOB estimate of error rate: 17.2%
+rf6predict <- predict(rforest6, db.rf[db.rf[,83] == 1, 1:81])
+confusionMatrix(as.factor(rf6predict), as.factor(db.rf[db.rf[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.6063 - increased, Recall = 0.3988, also increased
+rf6roc <- roc(as.numeric(db.rf[db.rf[,83] == 1, 82]), as.numeric(rf6predict))
+auc(rf6roc) # AUC = 0.6066 - increased
+```
+
+Since the test accuracy, recall, and AUC are increasing with increased node size, let's try 200 now.
+
+**100 Trees, 6 Variables per Tree, Node Size of 200**
+```{r 100 Trees; 6 Variables per Tree; Node Size of 200, message=FALSE}
+rforest7 <- randomForest(readmitted ~ ., data=db.rf[db.rf[,83] != 1, 1:82], ntree=100, mtry=6, nodesize = 200, importance=F)
+rforest7 # OOB estimate oferror rate: 24.49%. Continuing to increase, indicating that training performance is decreasing. This is fine, as long as the test set is doing well
+rf7predict <- predict(rforest7, db.rf[db.rf[,83] == 1, 1:81])
+confusionMatrix(as.factor(rf7predict), as.factor(db.rf[db.rf[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.6129 - increased, Recall = 0.4912, also increased
+rf7roc <- roc(as.numeric(db.rf[db.rf[,83] == 1, 82]), as.numeric(rf7predict))
+auc(rf7roc) # AUC = 0.6131
+```
+
+Let's try a node size of 500 now.
+
+**100 Trees, 6 Variables per Tree, Node Size of 500**
+```{r 100 Trees; 6 Variables per Tree; Node Size of 500, message=FALSE}
+rforest8 <- randomForest(readmitted ~ ., data=db.rf[db.rf[,83] != 1, 1:82], ntree=100, mtry=6, nodesize = 500, importance=F)
+rforest8 # OOB estimate of error rate: 32.84%
+rf8predict <- predict(rforest8, db.rf[db.rf[,83] == 1, 1:81])
+confusionMatrix(as.factor(rf8predict), as.factor(db.rf[db.rf[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.6118 - similar to last, but slightly lower. It seems to have hit a point of diminishing returns. Recall is 0.5601 though, which is a big improvement
+rf8roc <- roc(as.numeric(db.rf[db.rf[,83] == 1, 82]), as.numeric(rf8predict))
+auc(rf8roc) # AUC = 0.6119
+```
+
+Let's keep the node size of 500 for now. Let's try setting the maximum number of terminal nodes (maxnodes) per tree to 0.3 times the sample size, which is about 34000. The default maxnodes is the maximum possible allowable by the node size.
+
+**100 Trees, 6 Variables per Tree, Node Size of 500, Max Nodes of 34000**
+```{r 100 Trees; 6 Variables per Tree; Node Size of 500; Max Nodes of 34000, message=FALSE}
+rforest9 <- randomForest(readmitted ~ ., data=db.rf[db.rf[,83] != 1, 1:82], ntree=100, mtry=6, nodesize = 500, maxnodes = 34000, importance=F)
+rforest9 # OOB estimate of error rate: 32.44%
+rf9predict <- predict(rforest9, db.rf[db.rf[,83] == 1, 1:81])
+confusionMatrix(as.factor(rf9predict), as.factor(db.rf[db.rf[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.6156 - increased, Recall = 0.5584, which is slightly decreased
+rf9roc <- roc(as.numeric(db.rf[db.rf[,83] == 1, 82]), as.numeric(rf9predict))
+auc(rf9roc) # AUC = 0.6157
+```
+
+Let's try decreasing the maxnodes even further, to 17000.
+
+**100 Trees, 6 Variables per Tree, Node Size of 500, Max Nodes of 17000**
+```{r 100 Trees; 6 Variables per Tree; Node Size of 500; Max Nodes of 17000, message=FALSE}
+rforest10 <- randomForest(readmitted ~ ., data=db.rf[db.rf[,83] != 1, 1:82], ntree=100, mtry=6, nodesize = 500, maxnodes = 17000, importance=F)
+rforest10 # OOB estimate of error rate: 32.64%
+rf10predict <- predict(rforest10, db.rf[db.rf[,83] == 1, 1:81])
+confusionMatrix(as.factor(rf10predict), as.factor(db.rf[db.rf[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.6175 - increased slightly. Recall = 0.5743, increased. We'll keep the maxnodes at 17000 then
+rf10roc <- roc(as.numeric(db.rf[db.rf[,83] == 1, 82]), as.numeric(rf10predict))
+auc(rf10roc) # AUC = 0.6176 - increased slightly as well
+```
+
+We'll keep the maxnodes at 17000, as there was a slight increase in accuracy, recall, and AUC from the previous iteration. Let's try one last change to the number of variables per tree (mtry) to see if it makes a positive difference. We'll decrease the number from 6 to 4.
+
+**100 Trees, 4 Variables per Tree, Node Size of 500, Max Nodes of 17000**
+```{r 100 Trees; 4 Variables per Tree; Node Size of 500; Max Nodes of 17000, message=FALSE}
+rforest11 <- randomForest(readmitted ~ ., data=db.rf[db.rf[,83] != 1, 1:82], ntree=100, mtry=4, nodesize = 500, maxnodes = 17000, importance=F)
+rforest11 # OOB estimate of error rate: 33.82%
+rf11predict <- predict(rforest11, db.rf[db.rf[,83] == 1, 1:81])
+confusionMatrix(as.factor(rf11predict), as.factor(db.rf[db.rf[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.6064, Recall = 0.5616. The change didn't appear to produce an improvement. We'll keep mtry at 6
+rf11roc <- roc(as.numeric(db.rf[db.rf[,83] == 1, 82]), as.numeric(rf11predict))
+auc(rf11roc) # AUC = 0.6064
+```
+
+There didn't appear to be any improvement with changing the number of variables per tree to 4, so we'll keep it at 6. With those parameters, let's try again using 500 trees to see if it's feasible and worthwhile to run 10-fold cross validation on this.
+
+**500 Trees, 6 Variables per Tree, Node Size of 500, Max Nodes of 17000**
+```{r 500 Trees; 6 Variables per Tree; Node Size of 500; Max Nodes of 17000, message=FALSE}
+rforest12 <- randomForest(readmitted ~ ., data=db.rf[db.rf[,83] != 1, 1:82], ntree=500, mtry=6, nodesize = 500, maxnodes = 17000, importance=F) # Took about 15 min
+rforest12 # OOB estimate of error rate: 32.26%
+rf12predict <- predict(rforest12, db.rf[db.rf[,83] == 1, 1:81])
+confusionMatrix(as.factor(rf12predict), as.factor(db.rf[db.rf[,83] == 1, 82]), mode="prec_recall", positive = "1") # Accuracy = 0.61, Recall = 0.5620 - very close to same metrics as 100 trees case. Will stick with 100 trees for 10-fold cross validation for feasibility
+rf12roc <- roc(as.numeric(db.rf[db.rf[,83] == 1, 82]), as.numeric(rf12predict))
+auc(rf12roc) # AUC = 0.6101
+```
+
+For the final random forest model that we will use 10-fold cross validation on, we will stick with 6 features per tree (mtry), 100 trees (ntree), a minimum node size of 500, and a maximum of 17000 terminal nodes per tree (maxnodes).
+
+**Random Forest Final Model: 100 Trees, 6 Variables per Tree, Node Size of 500, Max Nodes of 17000**
+```{r Random Forest Final Model: 100 Trees; 6 Variables per Tree; Node Size of 500; Max Nodes of 17000, message=FALSE}
+set.seed(26) 
+
+# Create empty dataframe to house evaluation measures
+accuracy <- rep(0, times = 10)
+precision <- rep(0, times = 10)
+recall <- rep(0, times = 10)
+f1 <- rep(0, times = 10)
+auc <- rep(0, times = 10)
+eval.rf <- as.data.frame(cbind(accuracy, precision, recall, f1, auc))
+
+# Run algorithm for each group of folds; store evaluation metrics for each fold in a dataframe (eval.rf)
+for (f in 1:10){
+  rfclass <- randomForest(readmitted ~ ., data=db.rf[db.rf[,83] != f, 1:82], ntree=100, mtry=6, nodesize = 500, maxnodes = 17000, importance=F)
+  rfpredict <- predict(rfclass, db.rf[db.rf[,83] == f, 1:81])
+  rfresult <- confusionMatrix(as.factor(rfpredict), as.factor(db[db[,83] == f, 82]), mode="prec_recall", positive = "1")
+  eval.rf$accuracy[f] <- rfresult$overall['Accuracy']
+  eval.rf$precision[f] <- rfresult$byClass['Precision']
+  eval.rf$recall[f] <- rfresult$byClass['Recall']
+  eval.rf$f1[f] <- rfresult$byClass['F1']
+  rfroc <- roc(as.numeric(db[db[,83] == f, 82]), as.numeric(rfpredict))
+  eval.rf$auc[f] <- auc(rfroc)
+} # Took about 25 min to run
+
+#Evaluate
+eval.rf
+summary(eval.rf) # Mean metrics are: Accuracy = 0.6053, Precision = 0.6181, Recall = 0.5538, f1 = 0.5841, AUC = 0.6054
+```
+
+
+# Logistic Regression Model Creation and Evaluation
+
+Logistic regression is a generalized linear model which uses probabilities to classify cases. The only parameters to change here are the variables inputted to the model. No seed is needed as results are not based on any random number usage.
+
+```{r Logistic Regression Prep}
+db.lr <- db.over # Create a data frame specific to the model so that the target variable (readmitted) is a factor
+db.lr$readmitted <- as.factor(db.lr$readmitted)
+```
+
+First we will try running a logistic regression model using all variables.
+
+**Test Model 1: All Variables**
+```{r Test Model 1: All Variables}
+lr1 <- glm(formula = readmitted ~ ., data = db.lr[db.lr[,83] != 1, 1:82], family = 'binomial')
+summary(lr1) # Output indicates that 15 coefficients are not defined due to singularities. This is expected, as the dummy variables created for categorical variables matched the number of categories. E.g., A1C result had 3 categories (>7, None, Norm), and was turned into 3 dummy variables. If two of them are 0 for a case, the other one has to be 1. Therefore, these would be identified as being perfectly colinear. AIC = 151615
+```
+
+Let's remove one dummy variable from each categorical variable to remove any multicollinearity and clean up the output (the model just applied NA to one of each).
+
+**Test Model 2: Remove Variables Causing Multicollinearity**
+```{r Test Model 2: Remove Variables Causing Multicollinearity, message=FALSE}
+db.lr2 <- db.lr[,c(1:11, 13:16, 18:21, 23:26, 28:30, 32:38, 40:44, 46:50, 52:54, 56:58, 60:62, 64:66, 68:70, 72:74, 76:78, 80:83)] # Let's create a new data frame without the final dummy variable for each categorical variable, and re-run it through the logistic regression to clean it up
+
+lr2 <- glm(formula = readmitted ~ ., data = db.lr2[db.lr2[,68] != 1, 1:67], family = 'binomial')
+summary(lr2) # Same AIC (151615), but cleaner. There are a number of variables that are not identified as being statistically significant. Let's try the prediction for now anyways
+lr2prob <- predict(lr2, db.lr2[db.lr2[,68] == 1, 1:66])
+lr2predict <- ifelse(lr2prob>=0.5, 1, 0) # Anything with a 0.5 probability and over will be classified as 1. otherwise it will be classified as 0
+confusionMatrix(as.factor(lr2predict), db.lr2[db.lr2[,68] == 1, 67], mode="prec_recall", positive = "1") # Accuracy = 0.5778; Higher precision at 0.6984 than recall (0.2764), indicating that the model favoured false negatives over false positives
+lr2roc <- roc(as.numeric(db.lr2[db.lr2[,68] == 1, 67]), as.numeric(lr2predict))
+auc(lr2roc) # AUC = 0.5783
+```
+
+Let's remove any variable with a p-value greater than 0.05 for the model to see its effects
+
+**Test Model 3: Remove Variables that are Not Statistically Significant**
+```{r Test Model 3: Remove Variables that are Not Statistically Significant, message=FALSE}
+db.lr3 <- db.lr2[,c(1:2, 6:9, 11:13, 15, 17:21, 23, 27, 29:30, 32:35, 37:38, 41:42, 44:46, 48:50, 53, 59, 62, 64:68)] # Remove variables that were not statistically significant in the last model
+
+lr3 <- glm(formula = readmitted ~ ., data = db.lr3[db.lr3[,41] != 1, 1:40], family = 'binomial')
+summary(lr3) # AIC = 151673, which is actually slightly higher than the last model (which we don't want); also, race_Hispanic is no longer considered statistically significant
+lr3prob <- predict(lr3, db.lr3[db.lr3[,41] == 1, 1:39])
+lr3predict <- ifelse(lr3prob>=0.5, 1, 0)
+confusionMatrix(as.factor(lr3predict), db.lr3[db.lr3[,41] == 1, 40], mode="prec_recall", positive = "1") # Accuracy is 0.5771, which is very slightly lower than the last model. Recall is 0.2761, which is slightly lower as well, but not by much
+lr3roc <- roc(as.numeric(db.lr3[db.lr3[,41] == 1, 40]), as.numeric(lr3predict))
+auc(lr3roc) # AUC = 0.5776, which is also very slightly lower than the last model
+```
+
+Since Test Model 2 and 3 are so similar, and it's computationally feasible to run both for 10-fold cross validation, let's run both and see which one performs better overall.
+
+**Logistic Regression Decide on Final Model**
+```{r Logistic Regression Decide on Final Model, message=FALSE}
+# Create two empty dataframes to house the evaluation measures for each model
+accuracy <- rep(0, times = 10)
+precision <- rep(0, times = 10)
+recall <- rep(0, times = 10)
+f1 <- rep(0, times = 10)
+auc <- rep(0, times = 10)
+eval.lr2 <- as.data.frame(cbind(accuracy, precision, recall, f1, auc))
+eval.lr3 <- as.data.frame(cbind(accuracy, precision, recall, f1, auc))
+
+# Run algorithm for each group of folds for Model 2; store evaluation metrics for each fold in a dataframe (eval.lr2)
+for (f in 1:10){
+  lr2class <- glm(formula = readmitted ~ ., data = db.lr2[db.lr2[,68] != f, 1:67], family = 'binomial')
+  lr2prob <- predict(lr2class, db.lr2[db.lr2[,68] == f, 1:66])
+  lr2predict <- ifelse(lr2prob>=0.5, 1, 0)
+  lr2result <- confusionMatrix(as.factor(lr2predict), db.lr2[db.lr2[,68] == f, 67], mode="prec_recall", positive = "1")
+  eval.lr2$accuracy[f] <- lr2result$overall['Accuracy']
+  eval.lr2$precision[f] <- lr2result$byClass['Precision']
+  eval.lr2$recall[f] <- lr2result$byClass['Recall']
+  eval.lr2$f1[f] <- lr2result$byClass['F1']
+  lr2roc <- roc(as.numeric(db.lr2[db.lr2[,68] == f, 67]), as.numeric(lr2predict))
+  eval.lr2$auc[f] <- auc(lr2roc)
+} 
+
+# Evaluate Model 2
+eval.lr2
+summary(eval.lr2) # Mean Accuracy = 0.5689, mean Precision = 0.6845, mean Recall = 0.2576, mean f1 = 0.3742, mean AUC = 0.5694
+
+# Run algorithm for each group of folds for Model 3; store evaluation metrics for each fold in a dataframe (eval.lr3)
+for (f in 1:10){
+  lr3class <- glm(formula = readmitted ~ ., data = db.lr3[db.lr3[,41] != f, 1:40], family = 'binomial')
+  lr3prob <- predict(lr3class, db.lr3[db.lr3[,41] == f, 1:39])
+  lr3predict <- ifelse(lr3prob>=0.5, 1, 0)
+  lr3result <- confusionMatrix(as.factor(lr3predict), db.lr3[db.lr3[,41] == f, 40], mode="prec_recall", positive = "1")
+  eval.lr3$accuracy[f] <- lr3result$overall['Accuracy']
+  eval.lr3$precision[f] <- lr3result$byClass['Precision']
+  eval.lr3$recall[f] <- lr3result$byClass['Recall']
+  eval.lr3$f1[f] <- lr3result$byClass['F1']
+  lr3roc <- roc(as.numeric(db.lr3[db.lr3[,41] == f, 40]), as.numeric(lr3predict))
+  eval.lr3$auc[f] <- auc(lr3roc)
+} 
+
+# Evaluate Model 3
+eval.lr3
+summary(eval.lr3) # Mean Accuracy = 0.5686, mean Precision = 0.6842, mean Recall = 0.2570, mean f1 = 0.3736, mean AUC = 0.5691; values are all slightly lower here than for Model 2
+```
+
+The evaluation metric values are all slightly higher for Model 2 than Model 3 (though not by much), so we will consider Model 2 the final model for comparison.
+
+
+# Evaluation between Models
+
+Before running any statistical tests for comparison between models, we need to determine whether each distribution of evaluation metrics over the 10 folds is normal, as the sample size of paired observations for each model is only 10 (because there are 10 folds). We will therefore use the Shapiro Wilk test of normality on each distribution. Note that with the Shapiro Wilk test a p-value above alpha (0.05) indicates we cannot reject the null hypothesis that the distribution is normal. A p-value less than alpha indicates that the distribution is likely not normal.
+```{r Shapiro Wilk}
+sapply(eval38[,1:5], shapiro.test) # p-values all greater than alpha - normally distributed
+sapply(eval.knn[,1:5], shapiro.test) # p-values all greater than alpha - normally distributed
+sapply(eval.rf[,1:5], shapiro.test) # p-values all greater than alpha - normally distributed
+sapply(eval.lr2[,1:5], shapiro.test) # One of the p-values is less than alpha, for precision (p=0.01213728), indicating that we can reject the null hypothesis that the distribution is normal (i.e., we should treat it as not normal)
+```
+
+Given that all distributions are likely normal, except for the precision values in the logistic regression model metrics, and the sample size is small for each sample (n=10), we will use parametric statistical tests for accuracy, recall, f1, and AUC, and use non-parametric statistical tests for precision.
+
+We will run the block design two-way ANOVA (parametric) or Friedman (non-parametric) tests for each type of evaluation metric (accuracy, precision, recall, f1, AUC). If we find that any of the means (parametric) or medians (non-parametric) are different between distributions, we will run a pairwise test to identify which differ (pairwise paired t-test for parametric, pairwise Wilcoxon signed rank test for non-parametric).
+
+Before running any of these tests, we need to format the data accordingly.
+```{r Format Data for Statistical Tests}
+# Put all of each type of metric together in one vector
+acc <- c(eval38$accuracy, eval.knn$accuracy, eval.rf$accuracy, eval.lr2$accuracy) 
+prec <- c(eval38$precision, eval.knn$precision, eval.rf$precision, eval.lr2$precision)
+rec <- c(eval38$recall, eval.knn$recall, eval.rf$recall, eval.lr2$recall)
+f1 <- c(eval38$f1, eval.knn$f1, eval.rf$f1, eval.lr2$f1)
+auc <- c(eval38$auc, eval.knn$auc, eval.rf$auc, eval.lr2$auc)
+
+# Assign each group (model) to the applicable values as a vector
+model <- c(rep("nn", 10), rep("knn", 10), rep("rf", 10), rep("lr", 10)) # nn = neural network, knn = k nearest neighbours, rf = random forest, lr = logistic regression
+
+# Assign the folds as a variable, as we need to keep track of these since they make the data paired
+folds <- rep(1:10, times = 4) 
+
+# Combine the evaluation metric, model, and folds into each data frame for analysis
+eval.acc <- data.frame(acc, model, folds) 
+eval.prec <- data.frame(prec, model, folds)
+eval.rec <- data.frame(rec, model, folds)
+eval.f1 <- data.frame(f1, model, folds)
+eval.auc <- data.frame(auc, model, folds)
+```
+
+Let’s visualize the boxplots for each evaluation metric by model
+```{r Boxplots of Evaluation Metrics by Model}
+plot(acc ~ model, data=eval.acc, main = "Accuracy by Model", ylab = "Accuracy", xlab = "Model") # Distribution appears lowest for knn, highest for random forest. Neural network is close to random forest, though with a slightly lower mean and lower error
+plot(prec ~ model, data=eval.prec, main = "Precision by Model", ylab = "Precision", xlab = "Model") # Precision appears much higher for logistic regression, with knn as the lowest. Random forest and neural network are similar.
+plot(rec ~ model, data=eval.rec, main = "Recall by Model", ylab = "Recall", xlab = "Model") # Highest for neural network, though hard to tell by how much with the scale here. Recall for logistic regression is very low.
+plot(f1 ~ model, data=eval.f1, main = "F1 Score by Model", ylab = 'F1 Score', xlab = 'Model') # Highest for neural network here, with logistic regression f1 being very low (due to very low recall)
+plot(auc ~ model, data=eval.auc, main = "Area under the ROC Curve (AUC) by Model", ylab = "AUC", xlab = 'Model') # Highest for random forest with neural network following closely behind. Knn is the lowest
+```
+
+Now we may run the initial statistical tests for each evaluation metric (two-way ANOVA or Friedman).
+```{r ANOVA or Friedman}
+# ANOVA for Accuracy
+acc.model <- lm(acc ~ model + folds, data = eval.acc)
+anova(acc.model) # Findings are highly significant that at least one mean is different from the others between models (p=2.424e-14)
+
+# Friedman for Precision
+friedman.test(prec ~ model | folds, data=eval.prec) # Findings are highly significant that at least one median is different from the others between models (p=3.494e-06)
+
+# ANOVA for Recall
+rec.model <- lm(rec ~ model+folds, data=eval.rec)
+anova(rec.model) # Findings are highly significant that at least one mean is different from the others between models (p<2e-16)
+
+# ANOVA for f1
+f1.model <- lm(f1 ~ model+folds, data=eval.f1)
+anova(f1.model) # Findings are highly significant that at least one mean is different from the others between models (p<2e-16)
+
+# ANOVA for AUC
+auc.model <- lm(auc ~ model+folds, data=eval.auc)
+anova(auc.model) # Findings are highly significant that at least one mean is different from the others between models (p=2.587e-14)
+```
+
+Since there was a statistically significant difference in at least one of the means or medians found between models in each of the 5 evaluation metrics, we will perform pairwise two-sided tests for all of them to identify where the differences lie. 
+```{r Pairwise Paired T-Test or Wilcoxon Signed Rank Test}
+# Pairwise Paired Two-Sided T-Test for Accuracy
+pairwise.t.test(eval.acc$acc, eval.acc$model, p.adjust.method="bonferroni", paired = TRUE) # Accuracy for neural network and random forest are not significantly different from one another (p=1.0). Recall from the boxplots that these had the highest accuracy. The accuracy for all other pairings are significantly different from one another.
+
+# Pairwise Two-Sided Wilcoxon Signed Rank Test for Precision
+pairwise.wilcox.test(eval.prec$prec, eval.prec$model, p.adjust.method = "bonferroni", paired = TRUE) # Precision for neural network and random forest are not significantly different from one another (p=0.223). All other pairing are significantly different. Logistic regression had the highest precision (likely at the expense of recall).
+
+# Pairwise Paired Two-Sided T-Test for Recall
+pairwise.t.test(eval.rec$rec, eval.rec$model, p.adjust.method="bonferroni", paired = TRUE) # Neural network and random forest (the two highest on the boxplot) are not significantly different from one another (p=0.432). Interestingly, random forest and knn (3rd highest) are not significantly different from one another (p=0.090), while the neural network and knn are significantly different from one another at an alpha = 0.05 level (p=0.044). All other pairings are significantly different.
+
+# Pairwise Paired Two-Sided T-Test for F1 Score
+pairwise.t.test(eval.f1$f1, eval.f1$model, p.adjust.method="bonferroni", paired = TRUE) # The f1 score for neural network and random forest are not significantly different from one another (p=1.0). These two have the highest f1 scores, as is visible in the boxplot. The f1 score for all other pairings are significantly different from one another.
+
+# Pairwise Paired Two-Sided T-Test for AUC
+pairwise.t.test(eval.auc$auc, eval.auc$model, p.adjust.method="bonferroni", paired = TRUE) # AUC for neural network and random forest are not significantly different from one another (p=1.0). These two had the highest AUC, as is visible in the boxplots. The AUC for all other pairings are significantly different from one another.
+```
+
+The neural network and random forest models had the highest values in every evaluation metric except precision, where logistic regression was the highest. However, logistic regression had very low recall overall (mean recall of 0.2576), removing it as a viable option for prediction. The neural network and random forest evaluation metrics were not signficantly different from one another for every one of the five evaluation metrics. One difference however, is that with recall, the random forest model was not significantly different from the model with the next lowest score (knn), while the neural network model was significantly different from knn. The neural network model did have a higher mean recall than the random forest.
+
+We will be moving forward with both the optimized neural network model and random forest model to determine variable importance, since they performed similarly. This will allow us to compare and contrast the variables of importance used in each model
+
+
+# Variable Importance
+
+## Neural Nework Model
+
+Now that we have evaluated the models, we will use the optimized neural network model to identify the variables with the highest importance in model outcomes. We will do this by systematically removing each variable and identifying the effect the removal had on the AUC metric. AUC was chosen, as this has performed very similar to accuracy, and was used in most research papers reviewed in the literature review. As such, it will be easier to compare.
+```{r Variable Importance of Neural Network Model, message=FALSE}
+imp.auc <- rep(0, 81) # Create empty vector to house AUC for each missing variable
+allvariables <- names(db.over) # Create object with variable names to use for evaluation after
+variables <- allvariables[1:81] # Exclude variable names for 'readmitted' and 'folds'
+
+for (i in 1:81) {
+  
+  # Initiate
+  model.imp <- keras_model_sequential()
+  
+  # Layers
+  model.imp %>%
+    layer_dropout(rate = 0.5, input_shape = c(80)) %>% # Removed 1 input neuron as there will be 1 less input
+    layer_dense(units = 16, activation = 'relu') %>%
+    layer_dropout(rate = 0.5) %>%
+    layer_dense(units = 16, activation = 'relu') %>%
+    layer_dropout(rate = 0.5) %>%
+    layer_dense(units = 1, activation = 'sigmoid')
+
+# Compile
+  model.imp %>% compile(
+    loss = 'binary_crossentropy',
+    optimizer = 'adam',
+    metrics = 'accuracy'
+  )
+
+  # Train
+  model.imp %>% fit(
+    db[db[,83] != 1,  -c(i, 82, 83)], 
+    db[db[,83] != 1, 82], 
+    epochs = 50, 
+    batch_size = 128,
+    verbose = 0
+  )
+
+  # Predict classes for test data
+  mod.imp.class <- model.imp %>% predict_classes(db[db[,83] == 1, -c(i, 82, 83)], batch_size = 128)
+
+  # Evaluation
+  mod.imp.roc <- roc(as.numeric(db[db[,83] == 1, 82]), as.numeric(mod.imp.class))
+  imp.auc[i] <- as.numeric(auc(mod.imp.roc))
+}
+
+var.imp <- data.frame(imp.auc, variables) # Create data frame with AUC values and corresponding variable that's missing in that iteration
+var.imp$diff.auc <- 0.6063378 - var.imp$imp.auc # Create a derived variable of the AUC for the optimized neural network on the same fold minus the AUC obtained for each iteration (difference in AUC)
+var.imp <- var.imp[order(-var.imp$diff.auc),] # Order the rows by diff.auc in ascending order
+var.imp # Review findings 
+```
+
+
+## Random Forest Model
+
+Let's compare this to the variable importance noted by the final random forest model as well, since the two models performed similarly. This may be done easily while re-running the model by changing the 'importance' argument to true ('T').
+```{r Variable Importance of Random Forest Model}
+rf.var.imp <- randomForest(readmitted ~ ., data=db.rf[db.rf[,83] != 1, 1:82], ntree=100, mtry=6, nodesize = 500, maxnodes = 17000, importance=T) # Re-run the model on the same folds as the neural network above
+rf.imp <- importance(rf.var.imp) # Save the importance output to an object
+rf.imp[order(-rf.imp[,3]),] # Sort by mean decrease in accuracy (descending order). Highest mean decrease in accuracy is number_inpatient (same as for the neural network). Other ones in the top 10 here that are also in the top 10 for the neural network are time_in_hospital and discharge_disposition_id_DcOtherFacility
+rf.imp[order(-rf.imp[,4]),] # Sort by mean decrease in Gini (descending order). In the top 10 here as well as in nn are number_inpatient, discharge_disposition_id_DcOtherFacility and time_in_hospital.
+```
